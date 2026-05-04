@@ -67,7 +67,7 @@ export const config = {
   // 交易 (SOL本位 - 激进档默认)
   maxPositionSol: getEnvNum('MAX_POSITION_SOL', 1.5),
   maxTotalPositionSol: getEnvNum('MAX_TOTAL_POSITION_SOL', 20),
-  maxConcurrentPositions: getEnvNum('MAX_CONCURRENT_POSITIONS', 10),
+  maxConcurrentPositions: getEnvNum('MAX_CONCURRENT_POSITIONS', 6),
   defaultBuyAmountSol: getEnvNum('DEFAULT_BUY_AMOUNT_SOL', 0.5),
   defaultSlippageBps: getEnvNum('DEFAULT_SLIPPAGE_BPS', 300),
   priorityFeeMicroLamports: getEnvNum('PRIORITY_FEE_MICROLAMPORTS', 100000),
@@ -75,18 +75,18 @@ export const config = {
   // 风控
   stopLossPercent: getEnvNum('STOP_LOSS_PERCENT', 25),
   timeStopLossHours: getEnvNum('TIME_STOP_LOSS_HOURS', 10),
-  tp1Percent: getEnvNum('TP1_PERCENT', 100),       // 2x
-  tp1SellRatio: getEnvNum('TP1_SELL_RATIO', 50),
-  tp2Percent: getEnvNum('TP2_PERCENT', 200),       // 3x
-  tp2SellRatio: getEnvNum('TP2_SELL_RATIO', 100),  // 100% 清仓
-  volumeReversalProfitThreshold: getEnvNum('VOLUME_REVERSAL_PROFIT_THRESHOLD', 25),
+  tp1Percent: getEnvNum('TP1_PERCENT', 50),         // 1.5x
+  tp1SellRatio: getEnvNum('TP1_SELL_RATIO', 70),
+  tp2Percent: getEnvNum('TP2_PERCENT', 120),        // 2.2x
+  tp2SellRatio: getEnvNum('TP2_SELL_RATIO', 100),
+  volumeReversalProfitThreshold: getEnvNum('VOLUME_REVERSAL_PROFIT_THRESHOLD', 15),
   
   // 信号
   volumeBurstMultiplier: getEnvNum('VOLUME_BURST_MULTIPLIER', 5),
   uniqueBuyersMultiplier: getEnvNum('UNIQUE_BUYERS_MULTIPLIER', 3),
   buySellRatioThreshold: getEnvNum('BUY_SELL_RATIO_THRESHOLD', 2.5),
   newWalletRatioThreshold: getEnvNum('NEW_WALLET_RATIO_THRESHOLD', 0.5),
-  minBuySignalScore: getEnvNum('MIN_BUY_SIGNAL_SCORE', 65),
+  minBuySignalScore: getEnvNum('MIN_BUY_SIGNAL_SCORE', 75),
   
   // 大单检测 (SOL本位,相对统计)
   largeSwapMultiplier: getEnvNum('LARGE_SWAP_MULTIPLIER', 5),

@@ -206,9 +206,33 @@ export class TokenMonitor extends EventEmitter {
       return { success: false, reason: `Holders too few: ${market.holders}` };
     }
     
-    const top10Pct = security?.top10HolderPercent ? security.top10HolderPercent * 100 : 0;
-    if (top10Pct > config.maxTop10Percent) {
-      return { success: false, reason: `Top10 too concentrated: ${top10Pct.toFixed(1)}%` };
+    // 集中度判定: 用 top10UserPercent (仅真实用户,排除LP池子和合约)
+    // 这样不会误伤"LP占比高的健康币"
+    // 同时记录 top10HolderPercent (含一切持有者) 作为参考日志
+    const top10UserPct = security?.top10UserPercent !== undefined 
+      ? security.top10UserPercent * 100 
+      : null;
+    const top10HolderPct = security?.top10HolderPercent !== undefined
+      ? security.top10HolderPercent * 100
+      : null;
+    
+    if (top10UserPct !== null && top10UserPct > config.maxTop10Percent) {
+      return { 
+        success: false, 
+        reason: `Top10 users too concentrated: ${top10UserPct.toFixed(1)}% (holders incl LP: ${top10HolderPct?.toFixed(1) ?? 'N/A'}%)`,
+      };
+    }
+    
+    // 如果 top10UserPercent 数据缺失, fallback 到 top10HolderPercent + 宽松一些的阈值
+    // (因为 holder 含LP, 阈值需要相应放宽)
+    if (top10UserPct === null && top10HolderPct !== null) {
+      const fallbackThreshold = config.maxTop10Percent + 20;  // +20% 缓冲
+      if (top10HolderPct > fallbackThreshold) {
+        return {
+          success: false,
+          reason: `Top10 holders too concentrated: ${top10HolderPct.toFixed(1)}% (no user data, fallback threshold ${fallbackThreshold}%)`,
+        };
+      }
     }
     
     if (security?.freezeable) {

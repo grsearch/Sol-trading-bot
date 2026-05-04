@@ -288,10 +288,17 @@ class BirdeyeService {
     
     if (market && creation) {
       market.createdAt = creation.createdAt;
-      const top10Pct = security?.top10HolderPercent;
-      if (top10Pct !== undefined) {
-        market.top10HoldersPercent = top10Pct * 100;
+      
+      // Top10 持仓 - 两个字段都暴露
+      // top10HolderPercent: 含LP池子和合约,信息参考用
+      // top10UserPercent: 排除LP/合约,只算真实用户,用于集中度风险判定
+      if (security?.top10HolderPercent !== undefined) {
+        market.top10HoldersPercent = security.top10HolderPercent * 100;
       }
+      if (security?.top10UserPercent !== undefined) {
+        market.top10UsersPercent = security.top10UserPercent * 100;
+      }
+      
       if (pools.length > 0) {
         market.pool = pools[0];
       }

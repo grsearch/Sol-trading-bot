@@ -102,10 +102,14 @@ export class TradingEngine extends EventEmitter {
     this.pendingSignals.set(tokenAddress, true);
     
     try {
+      const tokenForLog = tokenMonitor.getToken(tokenAddress);
+      const isWarning = tokenForLog?.status === 'warning';
+      
       log.info('Executing buy', {
         symbol,
         score: score.total,
         sizeSol: recommendedSize,
+        ...(isWarning && { warningMode: true, note: 'Half position size due to warning status' }),
       });
       
       const result = await jupiterService.buy(
@@ -235,9 +239,13 @@ export class TradingEngine extends EventEmitter {
         urgency: signal.urgency,
       });
       
-      // 高紧急度增加滑点
-      const slippage = signal.urgency === 'critical' ? 1500
-        : signal.urgency === 'high' ? 800
+      // 紧急度对应滑点 (优化后:降低高紧急度的滑点,减少超额损失)
+      // critical(force_exit): 1000bps = 10% (原1500bps)
+      // high(stop_loss/large_sell): 500bps = 5% (原800bps,减少滑点超额)
+      // medium(TP/reversal): 300bps = 3% (默认)
+      // low(time_stop): 300bps = 3% (默认)
+      const slippage = signal.urgency === 'critical' ? 1000
+        : signal.urgency === 'high' ? 500
         : config.defaultSlippageBps;
       
       const result = await jupiterService.sell(

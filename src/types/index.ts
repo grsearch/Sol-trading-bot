@@ -25,7 +25,8 @@ export interface TokenMarketData {
   priceChange1h?: number;
   priceChange24h?: number;
   holders: number;
-  top10HoldersPercent?: number;
+  top10HoldersPercent?: number;    // Top10 总持仓(含LP/合约) - 信息参考
+  top10UsersPercent?: number;       // Top10 真实用户持仓(排除LP/合约) - 用于集中度风险判定
   createdAt: number;        // 上线时间戳
   pool?: PoolInfo;
 }

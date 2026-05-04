@@ -52,7 +52,9 @@ export class SignalEngine extends EventEmitter {
     for (const token of tokens) {
       if (token.status === 'protected') continue;
       if (token.hasPosition) continue;
-      if (token.status === 'warning' || token.status === 'exiting') continue;
+      // 只跳过 exiting 状态(正在清仓中)
+      // warning 状态允许开仓,但 calculatePositionSize 会自动减半仓位
+      if (token.status === 'exiting') continue;
       
       const last = this.lastSignalTime.get(token.address) ?? 0;
       if (Date.now() - last < SIGNAL_COOLDOWN_MS) continue;
@@ -115,27 +117,48 @@ export class SignalEngine extends EventEmitter {
       safety: 0,
     };
     
-    // === 1. 量能维度 (40%) ===
+    // === 1. 量能维度 (40%) - 改造为"健康区间评分" ===
     
-    // 1.1 量能爆发倍数
+    // 1.1 量能爆发倍数 - 分级评分,过热反向扣分
+    // 思路: 5-15x 是"温和的猛"(健康); 15x+ 是"过热"(顶部FOMO);
+    //      30x+ 是"极致过热"(几乎确定是顶部派发)
     const expectedNetBuy5m = baseline.netBuyPerMinute * 5;
     const burstRatio = expectedNetBuy5m > 0 
       ? fiveMin.netBuyVolumeSol / expectedNetBuy5m
       : (fiveMin.netBuyVolumeSol > 0 ? 10 : 0);
     
-    if (burstRatio >= config.volumeBurstMultiplier) {
+    if (burstRatio >= 30) {
+      // 极致过热 - 强扣分
+      breakdown.volumeBurst -= 25;
+      reasons.push(`⚠️ Extreme FOMO ${burstRatio.toFixed(1)}x (top warning)`);
+    } else if (burstRatio >= 15) {
+      // 过热区间 - 不加分
+      breakdown.volumeBurst += 0;
+      reasons.push(`High burst ${burstRatio.toFixed(1)}x (neutral)`);
+    } else if (burstRatio >= config.volumeBurstMultiplier) {
+      // 健康爆发(5-15x)
       breakdown.volumeBurst += 40;
       reasons.push(`Volume burst ${burstRatio.toFixed(1)}x`);
     } else if (burstRatio >= config.volumeBurstMultiplier * 0.6) {
-      breakdown.volumeBurst += 20;
+      // 温和爆发(3-5x)
+      breakdown.volumeBurst += 25;
+      reasons.push(`Mild burst ${burstRatio.toFixed(1)}x`);
     }
     
-    // 1.2 买卖笔数比
+    // 1.2 买卖笔数比 - 同样分级
+    // 2.5-6: 健康买盘占优
+    // 6-10: 过强,要警惕
+    // 10+: 几乎没人卖 = 不可持续(顶部特征)
     const buySellRatio = fiveMin.sellCount > 0 
       ? fiveMin.buyCount / fiveMin.sellCount
       : (fiveMin.buyCount > 0 ? 10 : 0);
     
-    if (buySellRatio >= config.buySellRatioThreshold) {
+    if (buySellRatio >= 10) {
+      breakdown.volumeBurst -= 15;
+      reasons.push(`⚠️ No selling ${buySellRatio.toFixed(1)}:1 (unsustainable)`);
+    } else if (buySellRatio >= 6) {
+      breakdown.volumeBurst += 5;
+    } else if (buySellRatio >= config.buySellRatioThreshold) {
       breakdown.volumeBurst += 30;
       reasons.push(`Buy/Sell ratio ${buySellRatio.toFixed(2)}`);
     } else if (buySellRatio >= 1.5) {
@@ -149,7 +172,7 @@ export class SignalEngine extends EventEmitter {
       return null;
     }
     
-    // === 2. 钱包结构维度 (35%) ===
+    // === 2. 钱包结构维度 (35%) - 同样反向过热保护 ===
     
     const uniqueBuyers = fiveMin.uniqueBuyers.size;
     const expectedBuyers = baseline.uniqueBuyersPer5m;
@@ -157,25 +180,40 @@ export class SignalEngine extends EventEmitter {
       ? uniqueBuyers / expectedBuyers 
       : (uniqueBuyers > 5 ? 5 : 0);
     
-    if (buyerBurst >= config.uniqueBuyersMultiplier) {
+    // 买家暴增: 3-8x 健康, 8-15x 警戒, 15x+ 过热
+    if (buyerBurst >= 15) {
+      breakdown.walletStructure -= 10;
+      reasons.push(`⚠️ Buyer mania ${buyerBurst.toFixed(1)}x`);
+    } else if (buyerBurst >= 8) {
+      breakdown.walletStructure += 15;
+    } else if (buyerBurst >= config.uniqueBuyersMultiplier) {
       breakdown.walletStructure += 40;
       reasons.push(`Buyers burst ${buyerBurst.toFixed(1)}x (${uniqueBuyers})`);
     } else if (buyerBurst >= 1.5) {
       breakdown.walletStructure += 20;
     }
     
-    // 新钱包占比
+    // 新钱包占比: 30-70% 健康, 70-90% 警戒, 90%+ 纯FOMO
+    // 90%+ 意味着老钱包都跑了,只剩散户接盘
     const newWalletRatio = uniqueBuyers > 0 ? fiveMin.newWallets.size / uniqueBuyers : 0;
-    if (newWalletRatio >= config.newWalletRatioThreshold) {
+    if (newWalletRatio >= 0.95) {
+      breakdown.walletStructure -= 20;
+      reasons.push(`⚠️ Pure FOMO ${(newWalletRatio * 100).toFixed(0)}% new (no diamond hands)`);
+    } else if (newWalletRatio >= 0.85) {
+      breakdown.walletStructure += 5;
+      reasons.push(`Mostly new ${(newWalletRatio * 100).toFixed(0)}%`);
+    } else if (newWalletRatio >= config.newWalletRatioThreshold) {
       breakdown.walletStructure += 30;
       reasons.push(`New wallet ${(newWalletRatio * 100).toFixed(0)}%`);
     } else if (newWalletRatio >= 0.3) {
-      breakdown.walletStructure += 15;
+      breakdown.walletStructure += 20;
+    } else if (newWalletRatio >= 0.15) {
+      // 老钱包主导也不一定不好(说明有持续买盘)
+      breakdown.walletStructure += 25;
+      reasons.push(`Old wallets active ${(newWalletRatio * 100).toFixed(0)}% new`);
     }
     
-    // 平均买单大小健康度 (SOL本位 - 散户主导特征区间)
-    // 0.05-1.5 SOL: 散户FOMO最理想区间
-    // ≥3 SOL: 巨鲸主导,谨慎
+    // 平均买单大小健康度 (保持原逻辑)
     const avgBuySize = fiveMin.avgBuySize;
     const HEALTHY_MIN_SOL = 0.05;
     const HEALTHY_MAX_SOL = 1.5;
@@ -187,26 +225,33 @@ export class SignalEngine extends EventEmitter {
       breakdown.walletStructure += 10;
       reasons.push(`Whale-driven (avg buy ${avgBuySize.toFixed(2)} SOL)`);
     } else if (avgBuySize >= HEALTHY_MAX_SOL && avgBuySize < WHALE_THRESHOLD_SOL) {
-      // 中间区间: 中等玩家,可接受
       breakdown.walletStructure += 20;
     }
     
-    // === 3. 价格结构维度 (15%) ===
+    // === 3. 价格结构维度 (15%) - 加入二次确认信号 ===
     
     if (token.lastPrice > 0) {
       breakdown.priceStructure = 50;
       
-      // 大单分布: 用相对统计判定
+      // 大单分布
       const largeBuyThreshold = this.getLargeSwapThresholdSol(token);
-      // fiveMin.largeBuys 字段是按"≥1 SOL"统计的旧标准
-      // 这里我们用近似: 如果有大单且不是单一主导,加分
       if (fiveMin.largeBuys > 0 && fiveMin.largeBuys < fiveMin.buyCount * 0.5) {
-        breakdown.priceStructure += 30;
+        breakdown.priceStructure += 20;
         reasons.push(`Healthy large buys ${fiveMin.largeBuys}`);
       }
-      
-      // 防止用 unused variable 警告
       void largeBuyThreshold;
+      
+      // ⭐ 二次确认信号 (核心创新)
+      // 检测"启动 → 冷却 → 再启动"模式
+      // 这种模式比"一次性暴涨"质量高得多,因为:
+      // 1. 第一次暴涨筛掉了纯Sniper bot
+      // 2. 冷却期让弱手离场
+      // 3. 第二次启动是"真共识"
+      const relaunchSignal = this.detectRelaunch(token);
+      if (relaunchSignal.detected) {
+        breakdown.priceStructure += 50;  // 大幅加分
+        reasons.push(`⭐ Re-launch pattern (${relaunchSignal.reason})`);
+      }
     }
     
     // === 4. 安全维度 (10%) ===
@@ -222,21 +267,21 @@ export class SignalEngine extends EventEmitter {
       }
     }
     
-    // === 加权总分 ===
+    // === 加权总分 (允许负数,因为各维度可以扣分) ===
     const total = Math.round(
-      Math.min(100, breakdown.volumeBurst) * 0.40 +
-      Math.min(100, breakdown.walletStructure) * 0.35 +
-      Math.min(100, breakdown.priceStructure) * 0.15 +
-      Math.min(100, breakdown.safety) * 0.10
+      Math.max(0, Math.min(100, breakdown.volumeBurst)) * 0.40 +
+      Math.max(0, Math.min(100, breakdown.walletStructure)) * 0.35 +
+      Math.max(0, Math.min(100, breakdown.priceStructure)) * 0.15 +
+      Math.max(0, Math.min(100, breakdown.safety)) * 0.10
     );
     
     const score: SignalScore = {
       total,
       breakdown: {
-        volumeBurst: Math.min(100, breakdown.volumeBurst),
-        walletStructure: Math.min(100, breakdown.walletStructure),
-        priceStructure: Math.min(100, breakdown.priceStructure),
-        safety: Math.min(100, breakdown.safety),
+        volumeBurst: Math.max(0, Math.min(100, breakdown.volumeBurst)),
+        walletStructure: Math.max(0, Math.min(100, breakdown.walletStructure)),
+        priceStructure: Math.max(0, Math.min(100, breakdown.priceStructure)),
+        safety: Math.max(0, Math.min(100, breakdown.safety)),
       },
       reasons,
     };
@@ -266,6 +311,8 @@ export class SignalEngine extends EventEmitter {
   /**
    * 计算推荐仓位大小 (SOL本位,流动性约束)
    * 用池子真实SOL深度作为约束,不依赖SOL美元价格
+   * 
+   * Warning状态(FDV/LP接近退出线): 仓位减半,降低风险
    */
   private calculatePositionSize(score: number, token: MonitoredToken): number {
     let size = config.defaultBuyAmountSol;
@@ -282,13 +329,91 @@ export class SignalEngine extends EventEmitter {
       maxByLp = poolSolReserve * 0.005;
     } else {
       // 池子数据不全时的兜底估算: 按LP_USD近似换算
-      // 假设LP是双边均衡的,SOL深度 ≈ LP_USD / 2 / SOL价格
-      // 这里SOL价格用一个不会太离谱的中间值,但仅在数据缺失时使用
       const fallbackSolReserve = token.lastLiquidity / 2 / 100;
       maxByLp = fallbackSolReserve * 0.005;
     }
     
-    return Math.min(size, maxByLp, config.maxPositionSol);
+    let finalSize = Math.min(size, maxByLp, config.maxPositionSol);
+    
+    // Warning状态: 仓位减半 (风险币降低敞口)
+    if (token.status === 'warning') {
+      finalSize = finalSize * 0.5;
+    }
+    
+    return finalSize;
+  }
+  
+  /**
+   * ⭐ 检测"二次确认"信号: 启动 → 冷却 → 再启动
+   * 
+   * 这是质量最高的买入时机,因为:
+   * 1. 第一次爆发筛掉了纯Sniper bot
+   * 2. 冷却期让弱手离场
+   * 3. 再次启动是真共识
+   * 
+   * 检测逻辑:
+   * - 过去30-90分钟内有过一次量能爆发(总买入显著)
+   * - 中间至少10分钟的相对冷却期(净流入接近0)
+   * - 当前最近几分钟出现温和的二次启动(净买入恢复, 但不是极致)
+   */
+  private detectRelaunch(token: MonitoredToken): { detected: boolean; reason: string } {
+    const NOT_DETECTED = { detected: false, reason: '' };
+    
+    // 拿过去60分钟的1分钟桶序列
+    const minuteSnapshots: { startMinAgo: number; netBuy: number; activity: number }[] = [];
+    for (let minAgo = 1; minAgo <= 60; minAgo++) {
+      const snap = volumeAggregator.getRecentSnapshot(token.address, minAgo);
+      if (!snap) continue;
+      
+      // 1分钟独立数据 (差分)
+      const prevSnap = volumeAggregator.getRecentSnapshot(token.address, minAgo - 1);
+      const minuteNetBuy = prevSnap 
+        ? snap.netBuyVolumeSol - prevSnap.netBuyVolumeSol 
+        : 0;
+      const minuteActivity = prevSnap 
+        ? (snap.buyCount + snap.sellCount) - (prevSnap.buyCount + prevSnap.sellCount) 
+        : 0;
+      
+      minuteSnapshots.push({ startMinAgo: minAgo, netBuy: minuteNetBuy, activity: minuteActivity });
+    }
+    
+    if (minuteSnapshots.length < 30) return NOT_DETECTED;
+    
+    // 把60分钟分成3个区段:
+    // 段A (40-60分钟前): 第一次爆发期
+    // 段B (15-40分钟前): 冷却期
+    // 段C (1-15分钟前):  二次启动期 (当前)
+    const segA = minuteSnapshots.filter(s => s.startMinAgo > 40 && s.startMinAgo <= 60);
+    const segB = minuteSnapshots.filter(s => s.startMinAgo > 15 && s.startMinAgo <= 40);
+    const segC = minuteSnapshots.filter(s => s.startMinAgo >= 1 && s.startMinAgo <= 15);
+    
+    if (segA.length < 5 || segB.length < 5 || segC.length < 5) return NOT_DETECTED;
+    
+    const sumA = segA.reduce((s, x) => s + x.netBuy, 0);
+    const sumB = segB.reduce((s, x) => s + x.netBuy, 0);
+    const sumC = segC.reduce((s, x) => s + x.netBuy, 0);
+    
+    const activityA = segA.reduce((s, x) => s + x.activity, 0);
+    const activityC = segC.reduce((s, x) => s + x.activity, 0);
+    
+    // 条件1: 段A有显著净买入(第一次爆发)
+    if (sumA <= 0 || activityA < 10) return NOT_DETECTED;
+    
+    // 条件2: 段B是冷却期(净流入显著小于段A,接近0或小幅负)
+    // 用相对值: B 段净流入应该 < A 段的 30%
+    if (sumB > sumA * 0.3) return NOT_DETECTED;
+    
+    // 条件3: 段C出现二次启动(净流入恢复)
+    // 但不要求过猛 - 段C >= 段A的 50%
+    if (sumC < sumA * 0.5) return NOT_DETECTED;
+    
+    // 条件4: 段C活跃度足够(说明有真买盘,不是单笔)
+    if (activityC < 8) return NOT_DETECTED;
+    
+    return {
+      detected: true,
+      reason: `1st burst ${sumA.toFixed(1)} SOL → cooldown ${sumB.toFixed(1)} → 2nd ${sumC.toFixed(1)}`,
+    };
   }
   
   /**
