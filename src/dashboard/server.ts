@@ -128,35 +128,49 @@ export class DashboardServer {
     // ==================== 代币监控池 ====================
     this.app.get('/api/tokens', (_req: Request, res: Response) => {
       const tokens = tokenMonitor.getAllTokens();
-      const enriched = tokens.map(t => ({
-        address: t.address,
-        symbol: t.symbol,
-        name: t.name,
-        status: t.status,
-        hasPosition: t.hasPosition,
-        addedAt: t.addedAt,
-        addedVia: t.addedVia,
-        sourceDetail: t.sourceDetail,
-        protectionUntil: t.protectionUntil,
-        listedAt: t.listedAt,
-        ageDays: (Date.now() - t.listedAt) / (24 * 3600 * 1000),
-        lastFdv: t.lastFdv,
-        lastLiquidity: t.lastLiquidity,
-        lastVolume24h: t.lastVolume24h,
-        lastHolders: t.lastHolders,
-        lastPrice: t.lastPrice,
-        lastUpdated: t.lastUpdated,
-        currentScore: t.currentScore,
-        poolType: t.pool?.type,
-      }));
+      const enriched = tokens.map(t => {
+        const evalResult = signalEngine.getLatestEvaluation(t.address);
+        return {
+          address: t.address,
+          symbol: t.symbol,
+          name: t.name,
+          status: t.status,
+          hasPosition: t.hasPosition,
+          addedAt: t.addedAt,
+          addedVia: t.addedVia,
+          sourceDetail: t.sourceDetail,
+          protectionUntil: t.protectionUntil,
+          listedAt: t.listedAt,
+          ageDays: (Date.now() - t.listedAt) / (24 * 3600 * 1000),
+          lastFdv: t.lastFdv,
+          lastLiquidity: t.lastLiquidity,
+          lastVolume24h: t.lastVolume24h,
+          lastHolders: t.lastHolders,
+          lastPrice: t.lastPrice,
+          lastUpdated: t.lastUpdated,
+          currentScore: t.currentScore,           // "持仓评估分"(用于淘汰排序)
+          poolType: t.pool?.type,
+          // ⭐ 真实的"买入信号评估" - 这才是决定是否买入的分数
+          buySignal: evalResult ? {
+            score: evalResult.score,
+            triggered: evalResult.triggered,
+            evaluatedAt: evalResult.timestamp,
+            breakdown: evalResult.breakdown,
+            reasons: evalResult.reasons,
+            rejectedReason: evalResult.rejectedReason,
+            threshold: config.minBuySignalScore,
+          } : null,
+        };
+      });
       
-      // 按score降序排列
+      // 按 currentScore 降序排列
       enriched.sort((a, b) => b.currentScore - a.currentScore);
       
       res.json({
         total: enriched.length,
         capacity: config.maxMonitoredTokens,
         capacityUsed: enriched.length / config.maxMonitoredTokens,
+        buySignalThreshold: config.minBuySignalScore,
         tokens: enriched,
       });
     });

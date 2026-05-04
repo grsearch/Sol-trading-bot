@@ -29,6 +29,31 @@ export class SignalEngine extends EventEmitter {
   private lastSignalTime = new Map<string, number>();
   private evalInterval: NodeJS.Timeout | null = null;
   
+  // 缓存每个币的最新评估结果(用于Dashboard显示)
+  private latestEvaluations = new Map<string, {
+    timestamp: number;
+    score: number;
+    breakdown: { volumeBurst: number; walletStructure: number; priceStructure: number; safety: number };
+    reasons: string[];
+    triggered: boolean;       // 是否达到75分门槛
+    rejectedReason?: string;  // 如果有,说明为什么没评估出信号
+  }>();
+  
+  /**
+   * 查询某币最近一次的买入信号评估结果
+   * 用于Dashboard显示"为什么这个币没有触发买入"
+   */
+  getLatestEvaluation(tokenAddress: string) {
+    return this.latestEvaluations.get(tokenAddress) ?? null;
+  }
+  
+  /**
+   * 获取所有评估结果(用于Dashboard列表)
+   */
+  getAllEvaluations() {
+    return Object.fromEntries(this.latestEvaluations);
+  }
+  
   start(): void {
     this.evalInterval = setInterval(() => this.scanBuySignals(), 30 * 1000);
     log.info('SignalEngine started', {
@@ -50,19 +75,50 @@ export class SignalEngine extends EventEmitter {
     const tokens = tokenMonitor.getActiveTokens();
     
     for (const token of tokens) {
-      if (token.status === 'protected') continue;
-      if (token.hasPosition) continue;
-      // 只跳过 exiting 状态(正在清仓中)
-      // warning 状态允许开仓,但 calculatePositionSize 会自动减半仓位
-      if (token.status === 'exiting') continue;
+      // 记录跳过原因(用于Dashboard显示)
+      let skipReason: string | null = null;
       
-      const last = this.lastSignalTime.get(token.address) ?? 0;
-      if (Date.now() - last < SIGNAL_COOLDOWN_MS) continue;
+      if (token.status === 'protected') skipReason = 'in_protection_period';
+      else if (token.hasPosition) skipReason = 'has_position';
+      else if (token.status === 'exiting') skipReason = 'exiting';
+      else {
+        const last = this.lastSignalTime.get(token.address) ?? 0;
+        if (Date.now() - last < SIGNAL_COOLDOWN_MS) {
+          skipReason = `signal_cooldown (${Math.ceil((SIGNAL_COOLDOWN_MS - (Date.now() - last)) / 1000)}s left)`;
+        }
+      }
+      
+      if (skipReason) {
+        // 跳过的币也记录(让Dashboard能显示"为什么没评估")
+        const existing = this.latestEvaluations.get(token.address);
+        if (!existing || Date.now() - existing.timestamp > 60_000) {
+          this.latestEvaluations.set(token.address, {
+            timestamp: Date.now(),
+            score: 0,
+            breakdown: { volumeBurst: 0, walletStructure: 0, priceStructure: 0, safety: 0 },
+            reasons: [],
+            triggered: false,
+            rejectedReason: skipReason,
+          });
+        }
+        continue;
+      }
       
       try {
         const signal = await this.evaluateBuyForToken(token);
         if (signal) {
           this.lastSignalTime.set(token.address, Date.now());
+          
+          // 缓存评估结果
+          const triggered = signal.score.total >= config.minBuySignalScore;
+          this.latestEvaluations.set(token.address, {
+            timestamp: signal.timestamp,
+            score: signal.score.total,
+            breakdown: signal.score.breakdown,
+            reasons: signal.score.reasons,
+            triggered,
+            rejectedReason: triggered ? undefined : `score ${signal.score.total} < ${config.minBuySignalScore}`,
+          });
           
           db.insertSignal({
             tokenAddress: token.address,
@@ -76,7 +132,7 @@ export class SignalEngine extends EventEmitter {
             executed: false,
           });
           
-          if (signal.score.total >= config.minBuySignalScore) {
+          if (triggered) {
             log.info('Buy signal triggered', {
               symbol: token.symbol,
               score: signal.score.total,
@@ -90,9 +146,27 @@ export class SignalEngine extends EventEmitter {
               score: signal.score.total,
             });
           }
+        } else {
+          // evaluateBuyForToken 返回 null = 数据不足 或 硬条件否决
+          this.latestEvaluations.set(token.address, {
+            timestamp: Date.now(),
+            score: 0,
+            breakdown: { volumeBurst: 0, walletStructure: 0, priceStructure: 0, safety: 0 },
+            reasons: [],
+            triggered: false,
+            rejectedReason: 'insufficient_data_or_hard_reject',
+          });
         }
       } catch (err: any) {
         log.error('evaluateBuyForToken error', { symbol: token.symbol, error: err.message });
+      }
+    }
+    
+    // 清理超过30分钟未更新的评估缓存
+    const cutoff = Date.now() - 30 * 60 * 1000;
+    for (const [addr, evalResult] of this.latestEvaluations.entries()) {
+      if (evalResult.timestamp < cutoff) {
+        this.latestEvaluations.delete(addr);
       }
     }
   }

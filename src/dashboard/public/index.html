@@ -110,7 +110,8 @@
           <tr>
             <th class="text-left py-2 px-2">Symbol</th>
             <th class="text-left py-2 px-2">Status</th>
-            <th class="text-right py-2 px-2">Score</th>
+            <th class="text-right py-2 px-2" title="淘汰排序分数(基于Volume/Holders趋势/活跃度)">Pool Score</th>
+            <th class="text-right py-2 px-2" title="买入信号评估分数(实时,决定是否买入)">Buy Signal</th>
             <th class="text-right py-2 px-2">Price</th>
             <th class="text-right py-2 px-2">FDV</th>
             <th class="text-right py-2 px-2">LP</th>
@@ -123,7 +124,7 @@
           </tr>
         </thead>
         <tbody id="tokens-table">
-          <tr><td colspan="12" class="text-center py-8 text-gray-500">Loading...</td></tr>
+          <tr><td colspan="13" class="text-center py-8 text-gray-500">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -363,11 +364,47 @@ async function refreshTokens() {
   
   const tbody = document.getElementById('tokens-table');
   if (data.tokens.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="text-center py-8 text-gray-500">监控池为空,通过webhook或手动添加代币</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="text-center py-8 text-gray-500">监控池为空,通过webhook或手动添加代币</td></tr>';
     return;
   }
   
-  tbody.innerHTML = data.tokens.map(t => `
+  const threshold = data.buySignalThreshold || 75;
+  
+  tbody.innerHTML = data.tokens.map(t => {
+    // 渲染 Buy Signal 列 - 这是真实的"买入决策分数"
+    const sig = t.buySignal;
+    let buySignalCell;
+    
+    if (!sig) {
+      buySignalCell = '<span class="text-xs text-gray-500" title="尚未评估">--</span>';
+    } else if (sig.rejectedReason && sig.score === 0) {
+      // 被跳过的(保护期/持仓中/冷却中等)
+      const shortReason = sig.rejectedReason
+        .replace('in_protection_period', '🛡️ Protection')
+        .replace('has_position', '✅ Position')
+        .replace('exiting', '🚪 Exiting')
+        .replace('insufficient_data_or_hard_reject', '🚫 No data')
+        .replace(/signal_cooldown.*/, '⏱️ Cooldown');
+      buySignalCell = `<span class="text-xs text-gray-500" title="${sig.rejectedReason}">${shortReason}</span>`;
+    } else {
+      // 有真实评分
+      const colorClass = sig.triggered 
+        ? 'text-green-400 font-bold'
+        : sig.score >= threshold - 10 
+          ? 'text-yellow-400'
+          : 'text-gray-400';
+      
+      const reasonsTooltip = (sig.reasons || []).join(' | ').replace(/"/g, '&quot;');
+      const breakdown = sig.breakdown 
+        ? `V:${sig.breakdown.volumeBurst}|W:${sig.breakdown.walletStructure}|P:${sig.breakdown.priceStructure}|S:${sig.breakdown.safety}` 
+        : '';
+      const titleText = `${reasonsTooltip}\n${breakdown}\nThreshold: ${threshold}`;
+      
+      const triggerIcon = sig.triggered ? '⭐' : '';
+      buySignalCell = `<span class="${colorClass} mono cursor-help" title="${titleText}">${triggerIcon}${sig.score}</span>`;
+    }
+    
+    return `
     <tr class="table-row border-b border-gray-800">
       <td class="py-2 px-2">
         <div class="font-medium">${t.symbol || '-'}</div>
@@ -380,7 +417,8 @@ async function refreshTokens() {
       <td class="py-2 px-2">
         <span class="status-${t.status} text-xs font-medium uppercase">${t.status}</span>
       </td>
-      <td class="py-2 px-2 text-right mono">${t.currentScore || 0}</td>
+      <td class="py-2 px-2 text-right mono text-gray-400" title="淘汰排序分数,与买入决策无关">${t.currentScore || 0}</td>
+      <td class="py-2 px-2 text-right">${buySignalCell}</td>
       <td class="py-2 px-2 text-right mono">$${formatPrice(t.lastPrice)}</td>
       <td class="py-2 px-2 text-right mono">$${formatNumber(t.lastFdv)}</td>
       <td class="py-2 px-2 text-right mono">$${formatNumber(t.lastLiquidity)}</td>
@@ -393,7 +431,8 @@ async function refreshTokens() {
         <button onclick="removeToken('${t.address}')" class="text-red-400 hover:text-red-300 text-xs">✕</button>
       </td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 }
 
 async function removeToken(address) {
