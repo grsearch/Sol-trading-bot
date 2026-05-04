@@ -330,11 +330,36 @@ export class DashboardServer {
     });
     
     // ==================== 静态文件 ====================
-    this.app.use(express.static(path.join(__dirname, 'public')));
+    // 候选路径列表(按优先级):
+    // 1. __dirname/public        - 相对当前文件(dev: src/dashboard/public, prod: dist/dashboard/public)
+    // 2. cwd()/src/dashboard/public  - 兜底: 即使prod忘了copy-assets也能从源码读
+    // 3. cwd()/dist/dashboard/public - 兜底: 跨平台路径异常时
+    const staticDirCandidates = [
+      path.join(__dirname, 'public'),
+      path.join(process.cwd(), 'src', 'dashboard', 'public'),
+      path.join(process.cwd(), 'dist', 'dashboard', 'public'),
+    ];
     
-    this.app.get('/', (_req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, 'public', 'index.html'));
-    });
+    let staticDir: string | null = null;
+    for (const candidate of staticDirCandidates) {
+      if (fs.existsSync(path.join(candidate, 'index.html'))) {
+        staticDir = candidate;
+        break;
+      }
+    }
+    
+    if (!staticDir) {
+      log.error('Dashboard static files not found in any candidate location', {
+        candidates: staticDirCandidates,
+      });
+    } else {
+      log.info('Dashboard static files location', { path: staticDir });
+      this.app.use(express.static(staticDir));
+      
+      this.app.get('/', (_req: Request, res: Response) => {
+        res.sendFile(path.join(staticDir!, 'index.html'));
+      });
+    }
     
     // 404
     this.app.use((_req: Request, res: Response) => {

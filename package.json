@@ -4,7 +4,8 @@
   "description": "Solana 链上自动交易机器人 - 量能驱动短线策略",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run copy-assets",
+    "copy-assets": "node scripts/copy-assets.js",
     "start": "node dist/index.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "dashboard": "ts-node-dev --respawn --transpile-only src/dashboard/server.ts",
