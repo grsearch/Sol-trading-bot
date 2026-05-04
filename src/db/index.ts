@@ -54,11 +54,23 @@ class DBManager {
         holder_trend TEXT DEFAULT '[]',
         score_history TEXT DEFAULT '[]',
         current_score REAL DEFAULT 0,
-        listed_at INTEGER NOT NULL
+        listed_at INTEGER NOT NULL,
+        price_history TEXT DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_monitored_status ON monitored_tokens(status);
       CREATE INDEX IF NOT EXISTS idx_monitored_score ON monitored_tokens(current_score);
     `);
+    
+    // 数据库迁移: 给已存在的表加 price_history 列(如果还没有)
+    try {
+      this.db.exec(`ALTER TABLE monitored_tokens ADD COLUMN price_history TEXT DEFAULT '[]'`);
+      log.info('Schema migration: added price_history column');
+    } catch (err: any) {
+      // 列已存在,忽略
+      if (!err.message.includes('duplicate column')) {
+        log.debug('price_history column check', { error: err.message });
+      }
+    }
     
     // 代币生命周期记录(进出历史)
     this.db.exec(`
@@ -196,13 +208,15 @@ class DBManager {
         added_at, added_via, source_detail, protection_until,
         status, has_position, last_fdv, last_liquidity,
         last_volume_24h, last_holders, last_price, last_updated,
-        holder_trend, score_history, current_score, listed_at
+        holder_trend, score_history, current_score, listed_at,
+        price_history
       ) VALUES (
         @address, @symbol, @name, @decimals, @pool_address, @pool_type,
         @added_at, @added_via, @source_detail, @protection_until,
         @status, @has_position, @last_fdv, @last_liquidity,
         @last_volume_24h, @last_holders, @last_price, @last_updated,
-        @holder_trend, @score_history, @current_score, @listed_at
+        @holder_trend, @score_history, @current_score, @listed_at,
+        @price_history
       )
       ON CONFLICT(address) DO UPDATE SET
         symbol = excluded.symbol,
@@ -217,7 +231,8 @@ class DBManager {
         last_updated = excluded.last_updated,
         holder_trend = excluded.holder_trend,
         score_history = excluded.score_history,
-        current_score = excluded.current_score
+        current_score = excluded.current_score,
+        price_history = excluded.price_history
     `);
     
     stmt.run({
@@ -243,6 +258,7 @@ class DBManager {
       score_history: JSON.stringify(token.scoreHistory),
       current_score: token.currentScore,
       listed_at: token.listedAt,
+      price_history: JSON.stringify(token.priceHistory ?? []),
     });
   }
   
@@ -317,6 +333,7 @@ class DBManager {
       scoreHistory: JSON.parse(row.score_history || '[]'),
       currentScore: row.current_score,
       listedAt: row.listed_at,
+      priceHistory: JSON.parse(row.price_history || '[]'),
     };
   }
   

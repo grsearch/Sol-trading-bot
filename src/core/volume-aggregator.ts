@@ -16,9 +16,9 @@ const BUCKET_SIZE_1M = 60 * 1000;
 const BUCKET_SIZE_5M = 5 * 60 * 1000;
 const BUCKET_SIZE_1H = 60 * 60 * 1000;
 
-const RETENTION_1M = 90 * 60 * 1000;   // 保留90分钟
-const RETENTION_5M = 6 * 60 * 60 * 1000;  // 6小时
-const RETENTION_1H = 48 * 60 * 60 * 1000; // 48小时
+const RETENTION_1M = 3 * 60 * 60 * 1000;   // 保留3小时(支持砸盘反弹检测的历史数据)
+const RETENTION_5M = 6 * 60 * 60 * 1000;   // 6小时
+const RETENTION_1H = 48 * 60 * 60 * 1000;  // 48小时
 
 const LARGE_BUY_SOL_THRESHOLD = 1;  // 大于1 SOL算大单
 
@@ -155,6 +155,29 @@ export class VolumeAggregator {
   }
   
   /**
+   * 获取指定分钟区间的聚合数据
+   * @param tokenAddress 代币地址
+   * @param fromMinAgo 起始时间(N分钟前)
+   * @param toMinAgo 结束时间(N分钟前,必须小于fromMinAgo)
+   * 例: getSnapshotInRange(addr, 60, 30) 返回 60-30分钟前的数据
+   */
+  getSnapshotInRange(
+    tokenAddress: string, 
+    fromMinAgo: number, 
+    toMinAgo: number
+  ): VolumeSnapshot | null {
+    const td = this.data.get(tokenAddress);
+    if (!td) return null;
+    if (toMinAgo >= fromMinAgo) return null;
+    
+    const now = Date.now();
+    const fromTs = now - fromMinAgo * 60 * 1000;
+    const toTs = now - toMinAgo * 60 * 1000;
+    
+    return this.aggregateBuckets(td.buckets1m, fromTs, toTs, BUCKET_SIZE_1M);
+  }
+  
+  /**
    * 获取最近1小时数据(从 5m 桶聚合,更精确)
    */
   getHourlySnapshot(tokenAddress: string): VolumeSnapshot | null {
@@ -178,6 +201,39 @@ export class VolumeAggregator {
    */
   getOneMinSnapshot(tokenAddress: string): VolumeSnapshot | null {
     return this.getRecentSnapshot(tokenAddress, 1);
+  }
+  
+  /**
+   * 获取近期净买入序列(每分钟一个值,从最近到最早)
+   * 用于检测趋势变化(如砸盘后转正)
+   * @param minutesBack 回溯多少分钟
+   * @returns Array<{minAgo, netBuy, sellVol, buyVol, count}>, 按分钟降序(最近的在前)
+   */
+  getNetBuyTimeSeries(
+    tokenAddress: string,
+    minutesBack: number = 60
+  ): Array<{ minAgo: number; netBuy: number; sellVol: number; buyVol: number; count: number }> {
+    const td = this.data.get(tokenAddress);
+    if (!td) return [];
+    
+    const result: Array<{ minAgo: number; netBuy: number; sellVol: number; buyVol: number; count: number }> = [];
+    const now = Date.now();
+    
+    for (let minAgo = 0; minAgo < minutesBack; minAgo++) {
+      const fromTs = now - (minAgo + 1) * 60 * 1000;
+      const toTs = now - minAgo * 60 * 1000;
+      const snap = this.aggregateBuckets(td.buckets1m, fromTs, toTs, BUCKET_SIZE_1M);
+      
+      result.push({
+        minAgo,
+        netBuy: snap.netBuyVolumeSol,
+        sellVol: snap.sellVolumeSol,
+        buyVol: snap.buyVolumeSol,
+        count: snap.buyCount + snap.sellCount,
+      });
+    }
+    
+    return result;
   }
   
   private aggregateBuckets(

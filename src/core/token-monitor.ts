@@ -279,6 +279,7 @@ export class TokenMonitor extends EventEmitter {
       scoreHistory: [],
       currentScore: 50,
       listedAt: market.createdAt || now,
+      priceHistory: market.price > 0 ? [{ ts: now, price: market.price }] : [],
     };
     
     // 6. 保存到 DB 和内存
@@ -434,6 +435,22 @@ export class TokenMonitor extends EventEmitter {
     // 更新holder趋势(保留最近24个数据点)
     token.holderTrend.push(market.holders);
     if (token.holderTrend.length > 24) token.holderTrend.shift();
+    
+    // 更新价格历史 (保留最近30分钟,每分钟一个点)
+    if (market.price > 0) {
+      if (!token.priceHistory) token.priceHistory = [];
+      const now = Date.now();
+      token.priceHistory.push({ ts: now, price: market.price });
+      
+      // 清理30分钟前的数据
+      const cutoff = now - 30 * 60 * 1000;
+      token.priceHistory = token.priceHistory.filter(p => p.ts > cutoff);
+      
+      // 防止数据点过多 (每分钟1个,30分钟应该最多30个)
+      if (token.priceHistory.length > 35) {
+        token.priceHistory = token.priceHistory.slice(-35);
+      }
+    }
     
     // 解除保护期
     if (token.status === 'protected' && Date.now() > token.protectionUntil) {

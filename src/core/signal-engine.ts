@@ -165,10 +165,19 @@ export class SignalEngine extends EventEmitter {
       breakdown.volumeBurst += 15;
     }
     
-    // 1.3 净买入必须为正(硬性条件)
+    // 1.3 净买入趋势 - 不再硬否决5分钟净买入
+    // 允许场景: 砸盘后刚转正,5分钟可能仍微负,但最近1-2分钟已转正
+    const oneMin = volumeAggregator.getOneMinSnapshot(token.address);
+    const isVeryRecentBuyPositive = oneMin && oneMin.netBuyVolumeSol > 0;
+    
     if (fiveMin.netBuyVolumeSol > 0) {
       breakdown.volumeBurst += 30;
+    } else if (isVeryRecentBuyPositive) {
+      // 5分钟还是负,但最近1分钟已转正 → 可能是反弹起点,谨慎给分
+      breakdown.volumeBurst += 10;
+      reasons.push('Recent 1m turned positive');
     } else {
+      // 5分钟和1分钟都净流出 → 硬否决
       return null;
     }
     
@@ -228,29 +237,49 @@ export class SignalEngine extends EventEmitter {
       breakdown.walletStructure += 20;
     }
     
-    // === 3. 价格结构维度 (15%) - 加入二次确认信号 ===
+    // === 3. 价格结构维度 (25%) - 关键创新维度 ===
+    // 包含: 大单健康度 + 二次启动 + 投降反弹 + 多次启动
     
     if (token.lastPrice > 0) {
-      breakdown.priceStructure = 50;
+      breakdown.priceStructure = 30;  // 基础分降低,留空间给信号加分
       
       // 大单分布
       const largeBuyThreshold = this.getLargeSwapThresholdSol(token);
       if (fiveMin.largeBuys > 0 && fiveMin.largeBuys < fiveMin.buyCount * 0.5) {
-        breakdown.priceStructure += 20;
+        breakdown.priceStructure += 15;
         reasons.push(`Healthy large buys ${fiveMin.largeBuys}`);
       }
       void largeBuyThreshold;
       
-      // ⭐ 二次确认信号 (核心创新)
-      // 检测"启动 → 冷却 → 再启动"模式
-      // 这种模式比"一次性暴涨"质量高得多,因为:
-      // 1. 第一次暴涨筛掉了纯Sniper bot
-      // 2. 冷却期让弱手离场
-      // 3. 第二次启动是"真共识"
+      // ⭐⭐ 投降式反弹 (Capitulation Bounce) - 最高质量信号
+      // 砸盘 → 衰竭 → 量能转正 = 低吸反弹机会
+      const capitulation = this.detectCapitulationBounce(token);
+      if (capitulation.detected) {
+        // 分级加分: 高质量 +60, 中质量 +45, 低质量 +30
+        const bonus = capitulation.quality === 'high' ? 60 
+                    : capitulation.quality === 'medium' ? 45 
+                    : 30;
+        breakdown.priceStructure += bonus;
+        reasons.push(`⭐⭐ ${capitulation.reason}`);
+      }
+      
+      // ⭐ 二次启动信号 (Re-launch)  
+      // 启动 → 冷却 → 再启动 = 真共识形成
       const relaunchSignal = this.detectRelaunch(token);
       if (relaunchSignal.detected) {
-        breakdown.priceStructure += 50;  // 大幅加分
+        breakdown.priceStructure += 40;
         reasons.push(`⭐ Re-launch pattern (${relaunchSignal.reason})`);
+      }
+      
+      // 多次启动加分: 该币近期(最多3小时内)出现过多次"启动-回落"循环
+      // 这种"波动型"币天然有反弹基因
+      const surgeCount = this.countRecentVolumeSurges(token, 3);
+      if (surgeCount >= 4) {
+        breakdown.priceStructure += 20;
+        reasons.push(`Volatile token (${surgeCount} surges in 3h)`);
+      } else if (surgeCount >= 2) {
+        breakdown.priceStructure += 12;
+        reasons.push(`Multi-surge pattern (${surgeCount} in 3h)`);
       }
     }
     
@@ -267,11 +296,13 @@ export class SignalEngine extends EventEmitter {
       }
     }
     
-    // === 加权总分 (允许负数,因为各维度可以扣分) ===
+    // === 加权总分 ===
+    // 权重调整: priceStructure(模式识别)从15%升到25%, volumeBurst从40%降到30%
+    // 因为模式识别(投降反弹/二次启动)的预测力比纯量能爆发更可靠
     const total = Math.round(
-      Math.max(0, Math.min(100, breakdown.volumeBurst)) * 0.40 +
+      Math.max(0, Math.min(100, breakdown.volumeBurst)) * 0.30 +
       Math.max(0, Math.min(100, breakdown.walletStructure)) * 0.35 +
-      Math.max(0, Math.min(100, breakdown.priceStructure)) * 0.15 +
+      Math.max(0, Math.min(100, breakdown.priceStructure)) * 0.25 +
       Math.max(0, Math.min(100, breakdown.safety)) * 0.10
     );
     
@@ -344,76 +375,241 @@ export class SignalEngine extends EventEmitter {
   }
   
   /**
-   * ⭐ 检测"二次确认"信号: 启动 → 冷却 → 再启动
+  /**
+   * ⭐ 检测"二次启动"信号: 启动 → 冷却 → 再启动
    * 
-   * 这是质量最高的买入时机,因为:
-   * 1. 第一次爆发筛掉了纯Sniper bot
-   * 2. 冷却期让弱手离场
-   * 3. 再次启动是真共识
+   * 时间窗口压缩到40分钟内 (Memecoin节奏快,启动-冷却-启动通常15-40min完成)
    * 
    * 检测逻辑:
-   * - 过去30-90分钟内有过一次量能爆发(总买入显著)
-   * - 中间至少10分钟的相对冷却期(净流入接近0)
-   * - 当前最近几分钟出现温和的二次启动(净买入恢复, 但不是极致)
+   * - 段A (20-40min前): 第一次启动 - 显著净买入
+   * - 段B (8-20min前):  冷却期 - 净买入显著小于段A
+   * - 段C (1-8min前):   二次启动 - 净买入恢复
    */
   private detectRelaunch(token: MonitoredToken): { detected: boolean; reason: string } {
     const NOT_DETECTED = { detected: false, reason: '' };
     
-    // 拿过去60分钟的1分钟桶序列
-    const minuteSnapshots: { startMinAgo: number; netBuy: number; activity: number }[] = [];
-    for (let minAgo = 1; minAgo <= 60; minAgo++) {
-      const snap = volumeAggregator.getRecentSnapshot(token.address, minAgo);
-      if (!snap) continue;
-      
-      // 1分钟独立数据 (差分)
-      const prevSnap = volumeAggregator.getRecentSnapshot(token.address, minAgo - 1);
-      const minuteNetBuy = prevSnap 
-        ? snap.netBuyVolumeSol - prevSnap.netBuyVolumeSol 
-        : 0;
-      const minuteActivity = prevSnap 
-        ? (snap.buyCount + snap.sellCount) - (prevSnap.buyCount + prevSnap.sellCount) 
-        : 0;
-      
-      minuteSnapshots.push({ startMinAgo: minAgo, netBuy: minuteNetBuy, activity: minuteActivity });
-    }
+    // 拿过去40分钟的每分钟净买入序列
+    const series = volumeAggregator.getNetBuyTimeSeries(token.address, 40);
+    if (series.length < 30) return NOT_DETECTED;
     
-    if (minuteSnapshots.length < 30) return NOT_DETECTED;
+    // 三段切分
+    const segA = series.filter(s => s.minAgo >= 20 && s.minAgo < 40);   // 20分钟窗口
+    const segB = series.filter(s => s.minAgo >= 8 && s.minAgo < 20);    // 12分钟窗口
+    const segC = series.filter(s => s.minAgo >= 1 && s.minAgo < 8);     // 7分钟窗口
     
-    // 把60分钟分成3个区段:
-    // 段A (40-60分钟前): 第一次爆发期
-    // 段B (15-40分钟前): 冷却期
-    // 段C (1-15分钟前):  二次启动期 (当前)
-    const segA = minuteSnapshots.filter(s => s.startMinAgo > 40 && s.startMinAgo <= 60);
-    const segB = minuteSnapshots.filter(s => s.startMinAgo > 15 && s.startMinAgo <= 40);
-    const segC = minuteSnapshots.filter(s => s.startMinAgo >= 1 && s.startMinAgo <= 15);
-    
-    if (segA.length < 5 || segB.length < 5 || segC.length < 5) return NOT_DETECTED;
+    if (segA.length < 12 || segB.length < 8 || segC.length < 5) return NOT_DETECTED;
     
     const sumA = segA.reduce((s, x) => s + x.netBuy, 0);
     const sumB = segB.reduce((s, x) => s + x.netBuy, 0);
     const sumC = segC.reduce((s, x) => s + x.netBuy, 0);
     
-    const activityA = segA.reduce((s, x) => s + x.activity, 0);
-    const activityC = segC.reduce((s, x) => s + x.activity, 0);
+    const activityA = segA.reduce((s, x) => s + x.count, 0);
+    const activityC = segC.reduce((s, x) => s + x.count, 0);
     
-    // 条件1: 段A有显著净买入(第一次爆发)
+    // 条件1: 段A有显著净买入(第一次启动)
     if (sumA <= 0 || activityA < 10) return NOT_DETECTED;
     
-    // 条件2: 段B是冷却期(净流入显著小于段A,接近0或小幅负)
-    // 用相对值: B 段净流入应该 < A 段的 30%
-    if (sumB > sumA * 0.3) return NOT_DETECTED;
+    // 条件2: 段B是冷却期 (净流入 < 段A的40% 或为负)
+    if (sumB > sumA * 0.4) return NOT_DETECTED;
     
-    // 条件3: 段C出现二次启动(净流入恢复)
-    // 但不要求过猛 - 段C >= 段A的 50%
-    if (sumC < sumA * 0.5) return NOT_DETECTED;
+    // 条件3: 段C出现二次启动 (>= 段A的50%, 因为窗口比例7/20)
+    // 段C只有7分钟,段A有20分钟,折算后段C每分钟净买入应 >= 段A每分钟的 50%
+    const sumA_perMin = sumA / segA.length;
+    const sumC_perMin = sumC / segC.length;
+    if (sumC_perMin < sumA_perMin * 0.5) return NOT_DETECTED;
     
-    // 条件4: 段C活跃度足够(说明有真买盘,不是单笔)
-    if (activityC < 8) return NOT_DETECTED;
+    // 条件4: 段C活跃度足够
+    if (activityC < 6) return NOT_DETECTED;
     
     return {
       detected: true,
       reason: `1st burst ${sumA.toFixed(1)} SOL → cooldown ${sumB.toFixed(1)} → 2nd ${sumC.toFixed(1)}`,
     };
+  }
+  
+  /**
+   * ⭐⭐ 检测"投降式反弹" (Capitulation Bounce)
+   * 
+   * 时间窗口大幅压缩到17分钟内,贴合Memecoin的快速V型反转节奏。
+   * 
+   * 检测逻辑(全部满足):
+   * 1. 砸盘期 (5-15min前):  强抛压(卖>买×2),量能放大,可选价格下跌
+   * 2. 衰竭期 (2-5min前):   卖压明显萎缩(<砸盘期×60%),仍有底部活跃度
+   * 3. 反转期 (2min内):     净买入转正,买盘强势(买>卖×1.5),活跃度足够
+   * 4. 价格判定 (可选):     1h价格变动 ≤ -15% (有真实跌幅),当前价格相对最低点回升 ≥ 2%
+   * 5. 流动性安全:          LP > $25K
+   */
+  private detectCapitulationBounce(token: MonitoredToken): { 
+    detected: boolean; 
+    reason: string;
+    quality: 'high' | 'medium' | 'low';
+  } {
+    const NOT_DETECTED = { detected: false, reason: '', quality: 'low' as const };
+    
+    // 流动性安全检查
+    if (token.lastLiquidity < 25000) return NOT_DETECTED;
+    
+    // 拿过去17分钟的每分钟数据
+    const series = volumeAggregator.getNetBuyTimeSeries(token.address, 17);
+    if (series.length < 12) return NOT_DETECTED;
+    
+    // 三段切分 - 短时间尺度
+    const segDump = series.filter(s => s.minAgo >= 5 && s.minAgo < 15);    // 10分钟窗口
+    const segDecay = series.filter(s => s.minAgo >= 2 && s.minAgo < 5);    // 3分钟窗口
+    const segBounce = series.filter(s => s.minAgo < 2);                    // 2分钟窗口
+    
+    if (segDump.length < 8 || segDecay.length < 2 || segBounce.length < 2) {
+      return NOT_DETECTED;
+    }
+    
+    // 各段统计
+    const dumpNetBuy = segDump.reduce((s, x) => s + x.netBuy, 0);
+    const dumpSellVol = segDump.reduce((s, x) => s + x.sellVol, 0);
+    const dumpBuyVol = segDump.reduce((s, x) => s + x.buyVol, 0);
+    const dumpActivity = segDump.reduce((s, x) => s + x.count, 0);
+    
+    const decaySellVol = segDecay.reduce((s, x) => s + x.sellVol, 0);
+    const decayActivity = segDecay.reduce((s, x) => s + x.count, 0);
+    
+    const bounceNetBuy = segBounce.reduce((s, x) => s + x.netBuy, 0);
+    const bounceSellVol = segBounce.reduce((s, x) => s + x.sellVol, 0);
+    const bounceBuyVol = segBounce.reduce((s, x) => s + x.buyVol, 0);
+    const bounceActivity = segBounce.reduce((s, x) => s + x.count, 0);
+    
+    // 量能基线: 用1h每5min平均卖出量作为参考
+    const baseline = volumeAggregator.getHourlyBaseline(token.address);
+    const baselineSellPer5m = baseline?.avgBuyVolume5m ?? 0;
+    
+    // === 量能维度判定 ===
+    
+    // 条件1: 砸盘期必须确实在砸 (卖压>买盘×2 + 净流出 + 量能放大)
+    if (dumpNetBuy >= 0) return NOT_DETECTED;
+    if (dumpSellVol < dumpBuyVol * 2.0) return NOT_DETECTED;
+    if (dumpActivity < 15) return NOT_DETECTED;
+    
+    // 砸盘强度: 砸盘期卖出量应明显高于该币正常量能
+    // 10分钟卖出量应 >= 该币基线5min卖出 × 3 (即放大3倍)
+    if (baselineSellPer5m > 0) {
+      const dumpSellRelativeBase = dumpSellVol / (baselineSellPer5m * 2);  // 10min vs 5min基线
+      if (dumpSellRelativeBase < 3) return NOT_DETECTED;
+    }
+    
+    // 条件2: 衰竭期卖压萎缩
+    const dumpAvgSellPerMin = dumpSellVol / segDump.length;
+    const decayAvgSellPerMin = decaySellVol / segDecay.length;
+    if (decayAvgSellPerMin >= dumpAvgSellPerMin * 0.6) return NOT_DETECTED;
+    if (decayActivity < 3) return NOT_DETECTED;
+    
+    // 条件3: 反转期净买入转正
+    if (bounceNetBuy <= 0) return NOT_DETECTED;
+    if (bounceActivity < 3) return NOT_DETECTED;
+    
+    // 条件4: 反转期买盘强度
+    if (bounceBuyVol < bounceSellVol * 1.5) return NOT_DETECTED;
+    
+    // === 价格维度判定 (基于价格历史) ===
+    
+    let priceCondMet = false;        // 是否满足价格判定
+    let priceDropPct = 0;            // 近期价格跌幅
+    let bounceFromLowPct = 0;        // 当前价格相对最低点回升幅度
+    
+    if (token.priceHistory && token.priceHistory.length >= 5) {
+      const now = Date.now();
+      const recentPrices = token.priceHistory.filter(p => now - p.ts <= 30 * 60 * 1000);
+      
+      if (recentPrices.length >= 3) {
+        const earliest = recentPrices[0].price;
+        const lowest = Math.min(...recentPrices.map(p => p.price));
+        const current = token.lastPrice;
+        
+        if (earliest > 0 && lowest > 0) {
+          priceDropPct = ((earliest - lowest) / earliest) * 100;
+          bounceFromLowPct = ((current - lowest) / lowest) * 100;
+          
+          // 价格条件: 跌幅 ≥ 15% 且 当前已从底部回升 ≥ 2%
+          // 注意: 这是辅助条件,如果价格历史不足不强制要求
+          if (priceDropPct >= 15 && bounceFromLowPct >= 2) {
+            priceCondMet = true;
+          }
+        }
+      }
+    }
+    
+    // === 命中! 评估质量分级 ===
+    
+    const dumpDepth = -dumpNetBuy;
+    const decayRatio = decayAvgSellPerMin / dumpAvgSellPerMin;
+    const bounceStrength = bounceBuyVol / bounceSellVol;
+    
+    let quality: 'high' | 'medium' | 'low' = 'low';
+    
+    // 高质量: 砸盘≥3SOL + 衰竭≥60% + 反转≥2.5x + 价格条件满足(下跌≥20%)
+    if (dumpDepth >= 3 && decayRatio <= 0.4 && bounceStrength >= 2.5 
+        && priceCondMet && priceDropPct >= 20) {
+      quality = 'high';
+    }
+    // 中质量: 砸盘≥2SOL + 反转≥2.0x + (价格条件满足 或 衰竭≥50%)
+    else if (dumpDepth >= 2 && bounceStrength >= 2.0 
+             && (priceCondMet || decayRatio <= 0.5)) {
+      quality = 'medium';
+    }
+    
+    const priceInfo = priceCondMet 
+      ? ` | price -${priceDropPct.toFixed(0)}% +${bounceFromLowPct.toFixed(0)}% from low`
+      : '';
+    
+    return {
+      detected: true,
+      quality,
+      reason: `Capitulation: dump ${dumpDepth.toFixed(1)} SOL → decay ${(decayRatio * 100).toFixed(0)}% → bounce ${bounceStrength.toFixed(1)}x${priceInfo} (${quality})`,
+    };
+  }
+  
+  /**
+   * 统计该币最近N小时内的"启动次数"
+   * 启动定义: 任意1分钟内净买入 > 阈值,且后续3-10分钟出现冷却(净买入下降50%+)
+   * 
+   * 多次启动的"波动型"币,反弹机会更多
+   */
+  private countRecentVolumeSurges(token: MonitoredToken, hoursBack: number = 24): number {
+    // 由于我们的1m桶只保留3小时,这里实际能查到的最多3小时
+    // 不影响功能,反映"近期活跃度"足够
+    const minutesBack = Math.min(hoursBack * 60, 180);
+    const series = volumeAggregator.getNetBuyTimeSeries(token.address, minutesBack);
+    
+    if (series.length < 30) return 0;
+    
+    // 启动阈值: 净买入 > 该币的小时基线 × 5
+    const baseline = volumeAggregator.getHourlyBaseline(token.address);
+    if (!baseline) return 0;
+    const surgeThreshold = Math.max(0.5, baseline.netBuyPerMinute * 5);
+    
+    let surgeCount = 0;
+    let inSurge = false;
+    let surgeEndedMinAgo = -Infinity;
+    
+    // 从最早到最近遍历(降序,所以反过来)
+    const ordered = [...series].reverse();
+    for (let i = 0; i < ordered.length; i++) {
+      const cur = ordered[i];
+      
+      if (cur.netBuy >= surgeThreshold) {
+        if (!inSurge) {
+          // 距上次启动结束至少5分钟才算新启动(避免连续大单算多次)
+          const minAgoCur = cur.minAgo;
+          if (Math.abs(surgeEndedMinAgo - minAgoCur) >= 5) {
+            surgeCount++;
+            inSurge = true;
+          }
+        }
+      } else if (inSurge && cur.netBuy < surgeThreshold * 0.3) {
+        // 启动结束(净买入回落到阈值30%以下)
+        inSurge = false;
+        surgeEndedMinAgo = cur.minAgo;
+      }
+    }
+    
+    return surgeCount;
   }
   
   /**

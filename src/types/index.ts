@@ -73,6 +73,9 @@ export interface MonitoredToken {
   scoreHistory: number[];   // 评分历史
   currentScore: number;
   
+  // 价格历史 (用于砸盘反弹检测,每分钟一个数据点,保留最近30分钟)
+  priceHistory: { ts: number; price: number }[];
+  
   // 上线时间
   listedAt: number;
 }
