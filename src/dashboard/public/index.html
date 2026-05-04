@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SOL Trading Bot Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #0b0f17; color: #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .card { background: #131923; border: 1px solid #1f2937; border-radius: 12px; }
+  .stat-card { background: linear-gradient(135deg, #131923 0%, #1a2333 100%); }
+  .table-row:hover { background: rgba(59, 130, 246, 0.05); }
+  .status-active { color: #10b981; }
+  .status-protected { color: #3b82f6; }
+  .status-warning { color: #f59e0b; }
+  .status-exiting { color: #ef4444; }
+  .pnl-positive { color: #10b981; }
+  .pnl-negative { color: #ef4444; }
+  .tab-active { background: #1e293b; color: #60a5fa; border-bottom: 2px solid #60a5fa; }
+  .scrollable { max-height: 500px; overflow-y: auto; }
+  .scrollable::-webkit-scrollbar { width: 8px; }
+  .scrollable::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+  .pulse-dot { animation: pulse 2s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .mono { font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace; }
+</style>
+</head>
+<body class="min-h-screen">
+<div id="app" class="container mx-auto px-4 py-6 max-w-7xl">
+
+  <!-- 顶部状态栏 -->
+  <header class="flex items-center justify-between mb-6">
+    <div class="flex items-center gap-3">
+      <div class="text-3xl">📊</div>
+      <div>
+        <h1 class="text-2xl font-bold">SOL Trading Bot</h1>
+        <div class="text-sm text-gray-400 flex items-center gap-2">
+          <span id="connection-status" class="flex items-center gap-1">
+            <span class="w-2 h-2 rounded-full bg-green-500 pulse-dot"></span>
+            <span>Connected</span>
+          </span>
+          <span>·</span>
+          <span id="dry-run-status">--</span>
+          <span>·</span>
+          <span id="uptime">Uptime --</span>
+        </div>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button onclick="toggleAutoRefresh()" id="refresh-btn" class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 hover:bg-blue-700">
+        ⏸ Pause Refresh
+      </button>
+      <button onclick="refreshAll()" class="px-3 py-1.5 text-sm rounded-lg bg-gray-700 hover:bg-gray-600">
+        🔄 Refresh
+      </button>
+    </div>
+  </header>
+
+  <!-- 24h 统计 + 钱包 + 系统 -->
+  <section class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+    <div class="stat-card card p-4">
+      <div class="text-xs text-gray-400 uppercase tracking-wide">24h PnL (SOL)</div>
+      <div id="stat-pnl-sol" class="text-2xl font-bold mt-1">--</div>
+      <div id="stat-pnl-detail" class="text-sm text-gray-400 mt-1">--</div>
+    </div>
+    <div class="stat-card card p-4">
+      <div class="text-xs text-gray-400 uppercase tracking-wide">24h Trades</div>
+      <div id="stat-trades" class="text-2xl font-bold mt-1">--</div>
+      <div id="stat-win-rate" class="text-sm text-gray-400 mt-1">--</div>
+    </div>
+    <div class="stat-card card p-4">
+      <div class="text-xs text-gray-400 uppercase tracking-wide">Monitoring</div>
+      <div id="stat-monitoring" class="text-2xl font-bold mt-1">--</div>
+      <div id="stat-capacity" class="text-sm text-gray-400 mt-1">--</div>
+    </div>
+    <div class="stat-card card p-4">
+      <div class="text-xs text-gray-400 uppercase tracking-wide">Wallet Balance</div>
+      <div id="stat-balance" class="text-2xl font-bold mt-1">--</div>
+      <div id="stat-positions" class="text-sm text-gray-400 mt-1">--</div>
+    </div>
+  </section>
+
+  <!-- Tab 切换 -->
+  <div class="flex border-b border-gray-700 mb-4 overflow-x-auto">
+    <button onclick="switchTab('tokens')" class="tab-btn tab-active px-4 py-2 text-sm font-medium" data-tab="tokens">
+      📋 Monitored Tokens
+    </button>
+    <button onclick="switchTab('positions')" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400" data-tab="positions">
+      💼 Positions
+    </button>
+    <button onclick="switchTab('trades')" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400" data-tab="trades">
+      📝 Trades
+    </button>
+    <button onclick="switchTab('reports')" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400" data-tab="reports">
+      📊 Daily Reports
+    </button>
+    <button onclick="switchTab('add')" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400" data-tab="add">
+      ➕ Add Token
+    </button>
+  </div>
+
+  <!-- 监控代币 Tab -->
+  <section id="tab-tokens" class="tab-content">
+    <div class="card p-4 scrollable">
+      <table class="w-full text-sm">
+        <thead class="text-xs text-gray-400 uppercase border-b border-gray-700">
+          <tr>
+            <th class="text-left py-2 px-2">Symbol</th>
+            <th class="text-left py-2 px-2">Status</th>
+            <th class="text-right py-2 px-2">Score</th>
+            <th class="text-right py-2 px-2">Price</th>
+            <th class="text-right py-2 px-2">FDV</th>
+            <th class="text-right py-2 px-2">LP</th>
+            <th class="text-right py-2 px-2">24h Vol</th>
+            <th class="text-right py-2 px-2">Holders</th>
+            <th class="text-right py-2 px-2">Age</th>
+            <th class="text-center py-2 px-2">Source</th>
+            <th class="text-center py-2 px-2">Pos</th>
+            <th class="text-center py-2 px-2">Action</th>
+          </tr>
+        </thead>
+        <tbody id="tokens-table">
+          <tr><td colspan="12" class="text-center py-8 text-gray-500">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 持仓 Tab -->
+  <section id="tab-positions" class="tab-content hidden">
+    <div class="card p-4 scrollable">
+      <table class="w-full text-sm">
+        <thead class="text-xs text-gray-400 uppercase border-b border-gray-700">
+          <tr>
+            <th class="text-left py-2 px-2">Symbol</th>
+            <th class="text-right py-2 px-2">Entry Price</th>
+            <th class="text-right py-2 px-2">Current Price</th>
+            <th class="text-right py-2 px-2">Cost (SOL)</th>
+            <th class="text-right py-2 px-2">Unrealized PnL</th>
+            <th class="text-right py-2 px-2">Realized PnL</th>
+            <th class="text-right py-2 px-2">Hold Time</th>
+            <th class="text-center py-2 px-2">Status</th>
+          </tr>
+        </thead>
+        <tbody id="positions-table">
+          <tr><td colspan="8" class="text-center py-8 text-gray-500">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 交易记录 Tab -->
+  <section id="tab-trades" class="tab-content hidden">
+    <div class="card p-4 scrollable">
+      <table class="w-full text-sm">
+        <thead class="text-xs text-gray-400 uppercase border-b border-gray-700">
+          <tr>
+            <th class="text-left py-2 px-2">Time</th>
+            <th class="text-left py-2 px-2">Symbol</th>
+            <th class="text-center py-2 px-2">Type</th>
+            <th class="text-right py-2 px-2">Token Amt</th>
+            <th class="text-right py-2 px-2">SOL Amt</th>
+            <th class="text-right py-2 px-2">Price (USD)</th>
+            <th class="text-right py-2 px-2">PnL (SOL)</th>
+            <th class="text-right py-2 px-2">PnL %</th>
+            <th class="text-left py-2 px-2">Reason</th>
+          </tr>
+        </thead>
+        <tbody id="trades-table">
+          <tr><td colspan="9" class="text-center py-8 text-gray-500">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 日报 Tab -->
+  <section id="tab-reports" class="tab-content hidden">
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold">Daily Reports</h3>
+        <button onclick="generateReportNow()" class="px-3 py-1.5 text-sm rounded-lg bg-blue-600 hover:bg-blue-700">
+          ⚡ Generate Today's Report Now
+        </button>
+      </div>
+      <div id="reports-list">
+        <div class="text-center py-8 text-gray-500">Loading...</div>
+      </div>
+    </div>
+    
+    <div id="report-detail" class="card p-4 mt-4 hidden">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold" id="report-detail-title">Report</h3>
+        <button onclick="closeReportDetail()" class="text-gray-400 hover:text-white">✕</button>
+      </div>
+      <div id="report-detail-content"></div>
+    </div>
+  </section>
+
+  <!-- 添加代币 Tab -->
+  <section id="tab-add" class="tab-content hidden">
+    <div class="card p-6 max-w-xl mx-auto">
+      <h3 class="font-semibold mb-4">Manually Add Token</h3>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">Token Address (CA)</label>
+          <input id="manual-address" type="text" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 mono text-sm" placeholder="例如: BWJ7zJauzatao4FsBnGdVsqdBi3k5NbgSY62noZApump">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">Symbol (可选,留空自动获取)</label>
+          <input id="manual-symbol" type="text" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="例如: Nana">
+        </div>
+        <button onclick="addTokenManually()" class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          Add to Monitoring
+        </button>
+        <div id="add-result" class="text-sm"></div>
+      </div>
+      
+      <hr class="border-gray-700 my-6">
+      
+      <div>
+        <h4 class="font-semibold mb-2">Webhook Endpoint</h4>
+        <p class="text-sm text-gray-400 mb-2">外部信号源可以通过 POST 推送代币:</p>
+        <pre class="bg-gray-900 rounded p-3 text-xs overflow-x-auto mono">curl -X POST http://localhost:3001/webhook/add-token \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_KEY" \
+  -d '{
+    "network": "solana",
+    "address": "...",
+    "symbol": "...",
+    "source": "kol_alice"
+  }'</pre>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+let autoRefresh = true;
+let refreshInterval = null;
+let currentTab = 'tokens';
+
+// ============ 数据格式化 ============
+function formatNumber(n, decimals = 2) {
+  if (n === null || n === undefined) return '-';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(decimals) + 'M';
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(decimals) + 'K';
+  return n.toFixed(decimals);
+}
+
+function formatPrice(p) {
+  if (!p) return '-';
+  if (p < 0.000001) return p.toExponential(2);
+  if (p < 0.01) return p.toFixed(8);
+  if (p < 1) return p.toFixed(6);
+  return p.toFixed(4);
+}
+
+function formatTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  return d.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function formatDateTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatDuration(ms) {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return sec + 's';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + 'm';
+  const hr = Math.floor(min / 60);
+  return hr + 'h ' + (min % 60) + 'm';
+}
+
+function shortAddr(addr) {
+  if (!addr) return '-';
+  return addr.slice(0, 4) + '...' + addr.slice(-4);
+}
+
+function pnlClass(pnl) {
+  if (pnl > 0) return 'pnl-positive';
+  if (pnl < 0) return 'pnl-negative';
+  return '';
+}
+
+// ============ 切换Tab ============
+function switchTab(tabName) {
+  currentTab = tabName;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    if (btn.dataset.tab === tabName) {
+      btn.classList.add('tab-active');
+      btn.classList.remove('text-gray-400');
+    } else {
+      btn.classList.remove('tab-active');
+      btn.classList.add('text-gray-400');
+    }
+  });
+  document.querySelectorAll('.tab-content').forEach(el => {
+    el.classList.add('hidden');
+  });
+  document.getElementById('tab-' + tabName).classList.remove('hidden');
+  refreshCurrentTab();
+}
+
+// ============ API 调用 ============
+async function api(path, opts = {}) {
+  try {
+    const res = await fetch(path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+    return await res.json();
+  } catch (err) {
+    console.error('API error', path, err);
+    return null;
+  }
+}
+
+// ============ 状态栏 ============
+async function refreshStatus() {
+  const data = await api('/api/system/status');
+  if (!data) return;
+  
+  document.getElementById('dry-run-status').textContent = data.dryRun ? '🟡 DRY RUN' : '🟢 LIVE';
+  document.getElementById('uptime').textContent = 'Uptime ' + formatDuration(data.uptime * 1000);
+  document.getElementById('stat-balance').textContent = data.wallet?.solBalance?.toFixed(4) + ' SOL' || '-- SOL';
+  document.getElementById('stat-positions').textContent = data.trading.openPositions + ' open · ' + data.trading.totalInvestedSol.toFixed(2) + ' SOL';
+  document.getElementById('stat-monitoring').textContent = data.monitor.total + '/' + Math.round(data.monitor.total / Math.max(data.monitor.capacityUsed, 0.001));
+  document.getElementById('stat-capacity').textContent = (data.monitor.capacityUsed * 100).toFixed(0) + '% used · ' + data.monitor.warning + ' warning';
+}
+
+async function refresh24hStats() {
+  const stats = await api('/api/stats/24h');
+  if (!stats) return;
+  
+  const pnlSolEl = document.getElementById('stat-pnl-sol');
+  const pnlClsName = stats.pnlSol > 0 ? 'pnl-positive' : stats.pnlSol < 0 ? 'pnl-negative' : '';
+  const sign = stats.pnlSol >= 0 ? '+' : '';
+  pnlSolEl.innerHTML = `<span class="${pnlClsName}">${sign}${stats.pnlSol.toFixed(4)} SOL</span>`;
+  
+  // 详细信息(替代原USD显示)
+  const winLossDetail = stats.totalTrades > 0
+    ? `${stats.winningTrades}W / ${stats.losingTrades}L`
+    : 'No trades yet';
+  document.getElementById('stat-pnl-detail').textContent = winLossDetail;
+  
+  document.getElementById('stat-trades').textContent = stats.totalTrades;
+  document.getElementById('stat-win-rate').textContent = (stats.winRate * 100).toFixed(1) + '% win rate';
+}
+
+// ============ 监控代币 ============
+async function refreshTokens() {
+  const data = await api('/api/tokens');
+  if (!data) return;
+  
+  const tbody = document.getElementById('tokens-table');
+  if (data.tokens.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" class="text-center py-8 text-gray-500">监控池为空,通过webhook或手动添加代币</td></tr>';
+    return;
+  }
+  
+  tbody.innerHTML = data.tokens.map(t => `
+    <tr class="table-row border-b border-gray-800">
+      <td class="py-2 px-2">
+        <div class="font-medium">${t.symbol || '-'}</div>
+        <div class="text-xs text-gray-500 mono">${shortAddr(t.address)}</div>
+      </td>
+      <td class="py-2 px-2">
+        <span class="status-${t.status} text-xs font-medium uppercase">${t.status}</span>
+      </td>
+      <td class="py-2 px-2 text-right mono">${t.currentScore || 0}</td>
+      <td class="py-2 px-2 text-right mono">$${formatPrice(t.lastPrice)}</td>
+      <td class="py-2 px-2 text-right mono">$${formatNumber(t.lastFdv)}</td>
+      <td class="py-2 px-2 text-right mono">$${formatNumber(t.lastLiquidity)}</td>
+      <td class="py-2 px-2 text-right mono">$${formatNumber(t.lastVolume24h)}</td>
+      <td class="py-2 px-2 text-right mono">${formatNumber(t.lastHolders, 0)}</td>
+      <td class="py-2 px-2 text-right text-xs">${t.ageDays.toFixed(1)}d</td>
+      <td class="py-2 px-2 text-center text-xs">${t.addedVia}</td>
+      <td class="py-2 px-2 text-center">${t.hasPosition ? '✅' : '-'}</td>
+      <td class="py-2 px-2 text-center">
+        <button onclick="removeToken('${t.address}')" class="text-red-400 hover:text-red-300 text-xs">✕</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function removeToken(address) {
+  if (!confirm('确认从监控池移除该代币?如有持仓将自动清算')) return;
+  await api('/api/tokens/' + address, { method: 'DELETE' });
+  refreshTokens();
+}
+
+// ============ 持仓 ============
+async function refreshPositions() {
+  const data = await api('/api/positions');
+  if (!data) return;
+  
+  const tbody = document.getElementById('positions-table');
+  if (data.positions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-gray-500">无持仓</td></tr>';
+    return;
+  }
+  
+  tbody.innerHTML = data.positions.map(p => {
+    const holdTime = formatDuration(Date.now() - p.entryTimestamp);
+    const unrealizedPnl = p.unrealizedPnlSol || 0;
+    const unrealizedPct = p.unrealizedPnlPercent || 0;
+    return `
+      <tr class="table-row border-b border-gray-800">
+        <td class="py-2 px-2">
+          <div class="font-medium">${p.symbol}</div>
+        </td>
+        <td class="py-2 px-2 text-right mono">$${formatPrice(p.entryPrice)}</td>
+        <td class="py-2 px-2 text-right mono">$${formatPrice(p.currentPrice)}</td>
+        <td class="py-2 px-2 text-right mono">${p.entryCostSol.toFixed(4)}</td>
+        <td class="py-2 px-2 text-right mono ${pnlClass(unrealizedPnl)}">
+          ${unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(4)}
+          <span class="text-xs">(${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(2)}%)</span>
+        </td>
+        <td class="py-2 px-2 text-right mono ${pnlClass(p.realizedPnlSol)}">
+          ${p.realizedPnlSol >= 0 ? '+' : ''}${p.realizedPnlSol.toFixed(4)}
+        </td>
+        <td class="py-2 px-2 text-right text-xs">${holdTime}</td>
+        <td class="py-2 px-2 text-center text-xs uppercase">${p.status}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ============ 交易记录 ============
+async function refreshTrades() {
+  const data = await api('/api/trades?limit=100');
+  if (!data) return;
+  
+  const tbody = document.getElementById('trades-table');
+  if (data.trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-gray-500">暂无交易记录</td></tr>';
+    return;
+  }
+  
+  tbody.innerHTML = data.trades.map(t => `
+    <tr class="table-row border-b border-gray-800">
+      <td class="py-2 px-2 text-xs text-gray-400">${formatDateTime(t.timestamp)}</td>
+      <td class="py-2 px-2 font-medium">${t.symbol}</td>
+      <td class="py-2 px-2 text-center">
+        <span class="text-xs uppercase ${t.type === 'buy' ? 'text-green-400' : 'text-red-400'}">${t.type}</span>
+      </td>
+      <td class="py-2 px-2 text-right mono text-xs">${formatNumber(t.tokenAmount, 2)}</td>
+      <td class="py-2 px-2 text-right mono">${t.solAmount.toFixed(4)}</td>
+      <td class="py-2 px-2 text-right mono">$${formatPrice(t.priceUsd)}</td>
+      <td class="py-2 px-2 text-right mono ${pnlClass(t.pnlSol)}">
+        ${t.pnlSol !== null && t.pnlSol !== undefined ? (t.pnlSol >= 0 ? '+' : '') + t.pnlSol.toFixed(4) : '-'}
+      </td>
+      <td class="py-2 px-2 text-right mono ${pnlClass(t.pnlPercent)}">
+        ${t.pnlPercent !== null && t.pnlPercent !== undefined ? (t.pnlPercent >= 0 ? '+' : '') + t.pnlPercent.toFixed(2) + '%' : '-'}
+      </td>
+      <td class="py-2 px-2 text-xs text-gray-400">${t.reason || '-'}</td>
+    </tr>
+  `).join('');
+}
+
+// ============ 日报 ============
+async function refreshReports() {
+  const data = await api('/api/reports');
+  if (!data) return;
+  
+  const list = document.getElementById('reports-list');
+  if (data.reports.length === 0) {
+    list.innerHTML = '<div class="text-center py-8 text-gray-500">暂无日报。每天 ' + 8 + ':00 自动生成,或点击上方按钮立即生成。</div>';
+    return;
+  }
+  
+  list.innerHTML = '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">' + data.reports.map(r => {
+    const cls = pnlClass(r.totalPnlSol);
+    const sign = r.totalPnlSol >= 0 ? '+' : '';
+    return `
+      <div class="bg-gray-800 rounded-lg p-4 cursor-pointer hover:bg-gray-700" onclick="viewReport('${r.date}')">
+        <div class="flex justify-between items-start">
+          <div>
+            <div class="font-semibold text-lg">${r.date}</div>
+            <div class="text-xs text-gray-400">${r.totalTrades} trades · ${(r.winRate * 100).toFixed(1)}% win rate</div>
+          </div>
+          <div class="text-right">
+            <div class="${cls} font-bold">${sign}${r.totalPnlSol.toFixed(4)} SOL</div>
+            <div class="text-xs text-gray-400">${r.totalTrades > 0 ? '~' + (r.totalPnlSol / r.totalTrades).toFixed(4) + ' SOL/trade' : ''}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('') + '</div>';
+}
+
+async function viewReport(date) {
+  const report = await api('/api/reports/' + date);
+  if (!report) return;
+  
+  document.getElementById('report-detail').classList.remove('hidden');
+  document.getElementById('report-detail-title').textContent = 'Report - ' + date;
+  
+  const s = report.summary;
+  const sign = (n) => n >= 0 ? '+' : '';
+  
+  let html = `
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      <div class="bg-gray-800 rounded p-3">
+        <div class="text-xs text-gray-400">Total Trades</div>
+        <div class="font-bold text-lg">${s.totalTrades}</div>
+      </div>
+      <div class="bg-gray-800 rounded p-3">
+        <div class="text-xs text-gray-400">Win Rate</div>
+        <div class="font-bold text-lg">${(s.winRate * 100).toFixed(1)}%</div>
+      </div>
+      <div class="bg-gray-800 rounded p-3">
+        <div class="text-xs text-gray-400">PnL (SOL)</div>
+        <div class="font-bold text-lg ${pnlClass(s.totalPnlSol)}">${sign(s.totalPnlSol)}${s.totalPnlSol.toFixed(4)}</div>
+      </div>
+      <div class="bg-gray-800 rounded p-3">
+        <div class="text-xs text-gray-400">Avg Hold Time</div>
+        <div class="font-bold text-lg">${s.avgHoldingTimeMin.toFixed(0)}m</div>
+      </div>
+    </div>
+  `;
+  
+  if (s.bestTrade) {
+    html += `<p class="mb-2">🏆 Best: <strong>${s.bestTrade.symbol}</strong> 
+      <span class="${pnlClass(s.bestTrade.pnlSol)}">${sign(s.bestTrade.pnlSol)}${s.bestTrade.pnlSol.toFixed(4)} SOL (${s.bestTrade.pnlPercent.toFixed(1)}%)</span>
+    </p>`;
+  }
+  if (s.worstTrade) {
+    html += `<p class="mb-4">📉 Worst: <strong>${s.worstTrade.symbol}</strong> 
+      <span class="${pnlClass(s.worstTrade.pnlSol)}">${s.worstTrade.pnlSol.toFixed(4)} SOL (${s.worstTrade.pnlPercent.toFixed(1)}%)</span>
+    </p>`;
+  }
+  
+  if (report.trades.length > 0) {
+    html += '<h4 class="font-semibold mb-2 mt-4">Trades</h4><div class="scrollable" style="max-height:300px"><table class="w-full text-xs"><thead class="text-gray-400"><tr><th class="text-left py-1">Time</th><th class="text-left py-1">Symbol</th><th class="text-center py-1">Type</th><th class="text-right py-1">SOL</th><th class="text-right py-1">PnL</th><th class="text-left py-1">Reason</th></tr></thead><tbody>';
+    for (const t of report.trades) {
+      html += `<tr class="border-b border-gray-800">
+        <td class="py-1">${formatTime(t.timestamp)}</td>
+        <td class="py-1">${t.symbol}</td>
+        <td class="py-1 text-center">${t.type}</td>
+        <td class="py-1 text-right mono">${t.solAmount.toFixed(4)}</td>
+        <td class="py-1 text-right mono ${pnlClass(t.pnlSol)}">${t.pnlSol !== null && t.pnlSol !== undefined ? (t.pnlSol >= 0 ? '+' : '') + t.pnlSol.toFixed(4) : '-'}</td>
+        <td class="py-1 text-gray-400">${t.reason || '-'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  
+  html += `<div class="mt-4 text-center"><a href="/api/reports/${date}/markdown" target="_blank" class="text-blue-400 hover:text-blue-300 text-sm">📥 Download Markdown</a></div>`;
+  
+  document.getElementById('report-detail-content').innerHTML = html;
+}
+
+function closeReportDetail() {
+  document.getElementById('report-detail').classList.add('hidden');
+}
+
+async function generateReportNow() {
+  const today = new Date().toISOString().split('T')[0];
+  const result = await api('/api/reports/generate', {
+    method: 'POST',
+    body: JSON.stringify({ date: today }),
+  });
+  if (result?.success) {
+    alert('日报已生成: ' + today);
+    refreshReports();
+  } else {
+    alert('生成失败: ' + (result?.error || 'unknown'));
+  }
+}
+
+// ============ 添加代币 ============
+async function addTokenManually() {
+  const address = document.getElementById('manual-address').value.trim();
+  const symbol = document.getElementById('manual-symbol').value.trim();
+  
+  if (!address) {
+    alert('请输入代币地址');
+    return;
+  }
+  
+  const resultEl = document.getElementById('add-result');
+  resultEl.innerHTML = '<span class="text-yellow-400">⏳ 正在验证并添加...</span>';
+  
+  const result = await api('/api/tokens', {
+    method: 'POST',
+    body: JSON.stringify({ address, symbol }),
+  });
+  
+  if (result?.success) {
+    resultEl.innerHTML = `<span class="text-green-400">✅ 添加成功: ${result.token.symbol}</span>`;
+    document.getElementById('manual-address').value = '';
+    document.getElementById('manual-symbol').value = '';
+    setTimeout(() => switchTab('tokens'), 1500);
+  } else {
+    resultEl.innerHTML = `<span class="text-red-400">❌ 添加失败: ${result?.reason || 'unknown error'}</span>`;
+  }
+}
+
+// ============ 自动刷新 ============
+function refreshCurrentTab() {
+  refreshStatus();
+  refresh24hStats();
+  if (currentTab === 'tokens') refreshTokens();
+  else if (currentTab === 'positions') refreshPositions();
+  else if (currentTab === 'trades') refreshTrades();
+  else if (currentTab === 'reports') refreshReports();
+}
+
+function refreshAll() {
+  refreshCurrentTab();
+}
+
+function toggleAutoRefresh() {
+  autoRefresh = !autoRefresh;
+  const btn = document.getElementById('refresh-btn');
+  if (autoRefresh) {
+    btn.textContent = '⏸ Pause Refresh';
+    btn.className = 'px-3 py-1.5 text-sm rounded-lg bg-blue-600 hover:bg-blue-700';
+    startAutoRefresh();
+  } else {
+    btn.textContent = '▶ Resume Refresh';
+    btn.className = 'px-3 py-1.5 text-sm rounded-lg bg-gray-600 hover:bg-gray-500';
+    if (refreshInterval) clearInterval(refreshInterval);
+  }
+}
+
+function startAutoRefresh() {
+  if (refreshInterval) clearInterval(refreshInterval);
+  refreshInterval = setInterval(refreshCurrentTab, 10000);
+}
+
+// 启动
+refreshAll();
+startAutoRefresh();
+</script>
+</body>
+</html>

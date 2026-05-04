@@ -1,0 +1,44 @@
+{
+  "name": "sol-trading-bot",
+  "version": "1.0.0",
+  "description": "Solana 链上自动交易机器人 - 量能驱动短线策略",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "dashboard": "ts-node-dev --respawn --transpile-only src/dashboard/server.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "@solana/spl-token": "^0.4.6",
+    "@coral-xyz/anchor": "^0.30.0",
+    "axios": "^1.7.0",
+    "ws": "^8.18.0",
+    "express": "^4.19.0",
+    "cors": "^2.8.5",
+    "better-sqlite3": "^11.0.0",
+    "node-cron": "^3.0.3",
+    "winston": "^3.13.0",
+    "dotenv": "^16.4.0",
+    "bs58": "^6.0.0",
+    "decimal.js": "^10.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/express": "^4.17.0",
+    "@types/cors": "^2.8.17",
+    "@types/ws": "^8.5.0",
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "ts-node-dev": "^2.0.0",
+    "jest": "^29.7.0",
+    "@types/jest": "^29.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
