@@ -335,7 +335,74 @@ class HeliusService extends EventEmitter {
     };
   }
   
-  // ========== RPC 工具方法 ==========
+  // ========== Token Metadata (链上元数据) ==========
+  
+  /**
+   * 从链上获取代币元数据(symbol, name, decimals)
+   * 这是最权威的来源,但比第三方API慢一些
+   * 
+   * 通过两步:
+   * 1. 先getMint拿到decimals
+   * 2. 再用Metaplex PDA拿到symbol/name
+   */
+  async getTokenMetadataOnChain(tokenAddress: string): Promise<{
+    symbol: string;
+    name: string;
+    decimals: number;
+  } | null> {
+    try {
+      const mint = new PublicKey(tokenAddress);
+      
+      // 1. 获取mint info(拿decimals)
+      const mintInfo = await this.connection.getParsedAccountInfo(mint);
+      const mintParsed = (mintInfo.value?.data as any)?.parsed?.info;
+      const decimals = mintParsed?.decimals ?? 9;
+      
+      // 2. 计算 Metaplex Metadata PDA
+      // PDA derivation: ['metadata', metadataProgramId, mintAddress]
+      const METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+      const [metadataPDA] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from('metadata'),
+          METADATA_PROGRAM_ID.toBuffer(),
+          mint.toBuffer(),
+        ],
+        METADATA_PROGRAM_ID,
+      );
+      
+      // 3. 获取metadata account
+      const accountInfo = await this.connection.getAccountInfo(metadataPDA);
+      if (!accountInfo?.data) {
+        return { symbol: '', name: '', decimals };
+      }
+      
+      // 4. 解析 Metaplex Metadata struct
+      // 格式: 1 byte key + 32 bytes update_authority + 32 bytes mint + 
+      //       4 bytes name length + name + 4 bytes symbol length + symbol + ...
+      const data = accountInfo.data;
+      let offset = 1 + 32 + 32;  // 跳过key + update_authority + mint
+      
+      // 读取name
+      const nameLen = data.readUInt32LE(offset);
+      offset += 4;
+      const name = data.slice(offset, offset + nameLen).toString('utf8').replace(/\0+$/, '').trim();
+      offset += nameLen;
+      
+      // 读取symbol
+      const symbolLen = data.readUInt32LE(offset);
+      offset += 4;
+      const symbol = data.slice(offset, offset + symbolLen).toString('utf8').replace(/\0+$/, '').trim();
+      
+      return { symbol, name, decimals };
+    } catch (err: any) {
+      log.debug('getTokenMetadataOnChain failed', { 
+        tokenAddress, error: err.message,
+      });
+      return null;
+    }
+  }
+  
+  // ========== 工具方法 ==========
   
   getConnection(): Connection {
     return this.connection;

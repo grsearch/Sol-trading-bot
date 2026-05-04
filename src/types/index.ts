@@ -219,7 +219,7 @@ export interface Trade {
 export interface WebhookPayload {
   network: string;
   address: string;
-  symbol: string;
+  symbol?: string;          // 可选,不提供会从链上自动获取
   source?: string;
   priority?: 'low' | 'normal' | 'high';
   context?: string;

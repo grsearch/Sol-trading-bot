@@ -109,6 +109,34 @@ class BirdeyeService {
   }
   
   /**
+   * 获取代币元数据(symbol, name, decimals, logo)
+   * 这是比 getTokenOverview 更轻量的接口,主要用于补全symbol
+   */
+  async getTokenMetadata(address: string): Promise<{
+    symbol: string;
+    name: string;
+    decimals: number;
+    logoURI?: string;
+  } | null> {
+    try {
+      const res = await this.client.get('/defi/v3/token/meta-data/single', {
+        params: { address },
+      });
+      if (!res.data?.success) return null;
+      const d = res.data.data;
+      return {
+        symbol: d.symbol || '',
+        name: d.name || '',
+        decimals: d.decimals ?? 9,
+        logoURI: d.logo_uri,
+      };
+    } catch (err: any) {
+      log.debug('getTokenMetadata failed', { address, error: err.message });
+      return null;
+    }
+  }
+  
+  /**
    * 获取代币概览(基础市场数据)
    * CU消耗: 较低
    */

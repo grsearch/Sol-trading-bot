@@ -371,7 +371,11 @@ async function refreshTokens() {
     <tr class="table-row border-b border-gray-800">
       <td class="py-2 px-2">
         <div class="font-medium">${t.symbol || '-'}</div>
-        <div class="text-xs text-gray-500 mono">${shortAddr(t.address)}</div>
+        <a href="https://gmgn.ai/sol/token/${t.address}" target="_blank" rel="noopener noreferrer"
+           class="text-xs text-blue-400 hover:text-blue-300 hover:underline mono"
+           title="View on GMGN: ${t.address}">
+          ${shortAddr(t.address)} ↗
+        </a>
       </td>
       <td class="py-2 px-2">
         <span class="status-${t.status} text-xs font-medium uppercase">${t.status}</span>
@@ -417,6 +421,11 @@ async function refreshPositions() {
       <tr class="table-row border-b border-gray-800">
         <td class="py-2 px-2">
           <div class="font-medium">${p.symbol}</div>
+          <a href="https://gmgn.ai/sol/token/${p.tokenAddress}" target="_blank" rel="noopener noreferrer"
+             class="text-xs text-blue-400 hover:text-blue-300 hover:underline mono"
+             title="View on GMGN">
+            ${shortAddr(p.tokenAddress)} ↗
+          </a>
         </td>
         <td class="py-2 px-2 text-right mono">$${formatPrice(p.entryPrice)}</td>
         <td class="py-2 px-2 text-right mono">$${formatPrice(p.currentPrice)}</td>
@@ -449,7 +458,14 @@ async function refreshTrades() {
   tbody.innerHTML = data.trades.map(t => `
     <tr class="table-row border-b border-gray-800">
       <td class="py-2 px-2 text-xs text-gray-400">${formatDateTime(t.timestamp)}</td>
-      <td class="py-2 px-2 font-medium">${t.symbol}</td>
+      <td class="py-2 px-2">
+        <div class="font-medium">${t.symbol}</div>
+        <a href="https://gmgn.ai/sol/token/${t.tokenAddress}" target="_blank" rel="noopener noreferrer"
+           class="text-xs text-blue-400 hover:text-blue-300 hover:underline mono"
+           title="View on GMGN">
+          ${shortAddr(t.tokenAddress)} ↗
+        </a>
+      </td>
       <td class="py-2 px-2 text-center">
         <span class="text-xs uppercase ${t.type === 'buy' ? 'text-green-400' : 'text-red-400'}">${t.type}</span>
       </td>

@@ -69,13 +69,112 @@ export class TokenMonitor extends EventEmitter {
   }
   
   /**
+   * 解析代币的symbol和name (多源fallback)
+   * 优先级: Birdeye Overview > Birdeye Metadata > 链上Metaplex > Webhook payload > 占位
+   * 
+   * @param address 代币地址
+   * @param marketData Birdeye Overview返回的市场数据(可选)
+   * @param hintSymbol Webhook/手动提供的symbol(作为参考,但不优先采用)
+   */
+  private async resolveTokenIdentity(
+    address: string,
+    marketData: { symbol?: string } | null,
+    hintSymbol?: string,
+  ): Promise<{ symbol: string; name: string; decimals: number; source: string }> {
+    // 1. Birdeye overview 已返回的 symbol (最常见情况)
+    if (marketData?.symbol && this.isValidSymbol(marketData.symbol)) {
+      // overview不返回decimals, 这里decimals保持默认,后续会从链上更新
+      return { 
+        symbol: marketData.symbol.trim(), 
+        name: '',
+        decimals: 9,
+        source: 'birdeye_overview',
+      };
+    }
+    
+    // 2. Birdeye metadata 接口 (overview失败时)
+    try {
+      const meta = await birdeyeService.getTokenMetadata(address);
+      if (meta && this.isValidSymbol(meta.symbol)) {
+        return {
+          symbol: meta.symbol.trim(),
+          name: meta.name,
+          decimals: meta.decimals,
+          source: 'birdeye_metadata',
+        };
+      }
+    } catch (err: any) {
+      log.debug('Birdeye metadata fallback failed', { address, error: err.message });
+    }
+    
+    // 3. 链上 Metaplex metadata (最权威但慢)
+    try {
+      const onchain = await heliusService.getTokenMetadataOnChain(address);
+      if (onchain && this.isValidSymbol(onchain.symbol)) {
+        return {
+          symbol: onchain.symbol.trim(),
+          name: onchain.name,
+          decimals: onchain.decimals,
+          source: 'onchain',
+        };
+      }
+      // 即使symbol拿不到,decimals通常能拿到
+      if (onchain?.decimals) {
+        return {
+          symbol: hintSymbol && this.isValidSymbol(hintSymbol) 
+            ? hintSymbol 
+            : `TOKEN_${address.slice(0, 6)}`,
+          name: onchain.name || '',
+          decimals: onchain.decimals,
+          source: hintSymbol ? 'webhook_hint' : 'placeholder',
+        };
+      }
+    } catch (err: any) {
+      log.debug('Onchain metadata fallback failed', { address, error: err.message });
+    }
+    
+    // 4. Webhook 提供的 hint (作为最后手段)
+    if (hintSymbol && this.isValidSymbol(hintSymbol)) {
+      return {
+        symbol: hintSymbol.trim(),
+        name: '',
+        decimals: 9,
+        source: 'webhook_hint',
+      };
+    }
+    
+    // 5. 占位符 (最坏情况)
+    return {
+      symbol: `TOKEN_${address.slice(0, 6)}`,
+      name: '',
+      decimals: 9,
+      source: 'placeholder',
+    };
+  }
+  
+  /**
+   * 判断symbol是否有效(过滤"UNKNOWN"等无意义值)
+   */
+  private isValidSymbol(symbol: string | undefined | null): boolean {
+    if (!symbol) return false;
+    const s = symbol.trim().toUpperCase();
+    if (s.length === 0 || s.length > 20) return false;
+    
+    // 黑名单: 明显的占位符
+    const invalidValues = ['UNKNOWN', 'UNDEFINED', 'NULL', 'NONE', 'N/A', '?', '-'];
+    if (invalidValues.includes(s)) return false;
+    
+    return true;
+  }
+  
+  /**
    * 添加代币(主入口)
    */
   async addToken(input: AddTokenInput): Promise<AddTokenResult> {
     const { address, via, sourceDetail } = input;
     let { symbol } = input;
     
-    log.info('Attempting to add token', { address, symbol, via });
+    log.info('Attempting to add token', { address, hintSymbol: symbol, via });
     
     // 1. 检查是否已在监控池
     if (this.tokens.has(address)) {
@@ -124,13 +223,21 @@ export class TokenMonitor extends EventEmitter {
       }
     }
     
-    // 5. 构造监控对象
+    // 5. 解析代币身份(symbol/name/decimals,多源fallback)
+    const identity = await this.resolveTokenIdentity(address, market, symbol);
+    log.info('Token identity resolved', {
+      address: address.slice(0, 8) + '...',
+      symbol: identity.symbol,
+      source: identity.source,
+    });
+    
+    // 6. 构造监控对象
     const now = Date.now();
     const token: MonitoredToken = {
       address: market.address,
-      symbol: symbol || market.symbol,
-      name: undefined,
-      decimals: 9,  // 默认,实际从链上获取
+      symbol: identity.symbol,
+      name: identity.name || undefined,
+      decimals: identity.decimals,
       pool: fullInfo.pools[0],
       addedAt: now,
       addedVia: via,
@@ -146,7 +253,7 @@ export class TokenMonitor extends EventEmitter {
       lastUpdated: now,
       holderTrend: [market.holders],
       scoreHistory: [],
-      currentScore: 50,  // 初始评分
+      currentScore: 50,
       listedAt: market.createdAt || now,
     };
     
@@ -260,6 +367,37 @@ export class TokenMonitor extends EventEmitter {
   private async updateOneToken(token: MonitoredToken): Promise<void> {
     const market = await birdeyeService.getTokenOverview(token.address);
     if (!market) return;
+    
+    // 修复无效的symbol(已存在的"UNKNOWN"等占位符也能被修复)
+    if (!this.isValidSymbol(token.symbol) || token.symbol.startsWith('TOKEN_')) {
+      // 如果Birdeye返回了有效symbol,优先用
+      if (this.isValidSymbol(market.symbol)) {
+        log.info('Token symbol updated', {
+          address: token.address.slice(0, 8) + '...',
+          oldSymbol: token.symbol,
+          newSymbol: market.symbol,
+        });
+        token.symbol = market.symbol.trim();
+      } else {
+        // 否则尝试链上fallback
+        try {
+          const onchain = await heliusService.getTokenMetadataOnChain(token.address);
+          if (onchain && this.isValidSymbol(onchain.symbol)) {
+            log.info('Token symbol updated from on-chain', {
+              address: token.address.slice(0, 8) + '...',
+              oldSymbol: token.symbol,
+              newSymbol: onchain.symbol,
+            });
+            token.symbol = onchain.symbol.trim();
+            if (onchain.name) token.name = onchain.name;
+            if (onchain.decimals) token.decimals = onchain.decimals;
+          }
+        } catch (err: any) {
+          // 静默失败,下次更新再试
+          log.debug('On-chain symbol fix failed', { error: err.message });
+        }
+      }
+    }
     
     // 更新数据
     token.lastFdv = market.fdv;

@@ -78,11 +78,13 @@ export class DashboardServer {
         try {
           const payload = req.body as WebhookPayload;
           
-          // 校验 payload
-          if (!payload.network || !payload.address || !payload.symbol) {
+          // 校验 payload (symbol 改为可选,会自动从Birdeye/链上获取)
+          if (!payload.network || !payload.address) {
             res.status(400).json({ 
               error: 'missing_fields',
-              required: ['network', 'address', 'symbol'],
+              required: ['network', 'address'],
+              optional: ['symbol', 'source', 'priority', 'context'],
+              note: 'symbol will be auto-resolved from on-chain metadata if not provided',
             });
             return;
           }
@@ -94,7 +96,7 @@ export class DashboardServer {
           
           log.info('Webhook received', {
             address: payload.address,
-            symbol: payload.symbol,
+            hintSymbol: payload.symbol,
             source: payload.source,
           });
           
